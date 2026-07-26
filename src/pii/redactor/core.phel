@@ -1,0 +1,669 @@
+(ns pii.redactor.core
+  (:require phel.string :as s))
+
+;; ---------------------------------------------------------------------------
+;; Declarative PII catalogue
+;; ---------------------------------------------------------------------------
+
+(def email-re #"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+
+;; A vector is intentional: discovery order is part of deterministic output and
+;; one column may match more than one PII type (for example display_name).
+(def pii-patterns
+  [[:email #"(mail|email)"]
+   [:url #"(user_url|link_url|comment_author_url|page_url|home_url)"]
+   [:name #"(first_name|last_name|nickname|full_name|display_name)"]
+   [:phone #"(phone|tel|fax|mobile)"]
+   [:address #"(address|city|state|country|zip|postal|street)"]
+   [:ip #"(ip_address|ip$)"]
+   [:login #"^(user_login|user_nicename|user_pass|display_name|comment_author)$"]])
+
+(def usermeta-re
+  "(^first_name$|^last_name$|^nickname$|^description$|^biography$|^user_url$|^aim$|^yim$|^jabber$)")
+
+(def postmeta-keys
+  ["_billing_first_name" "_billing_last_name" "_billing_email"
+   "_billing_company" "_billing_address_1" "_billing_address_2"
+   "_billing_city" "_billing_state" "_billing_postcode" "_billing_country"
+   "_billing_phone" "_billing_fax"
+   "_shipping_first_name" "_shipping_last_name"
+   "_shipping_company" "_shipping_address_1" "_shipping_address_2"
+   "_shipping_city" "_shipping_state" "_shipping_postcode" "_shipping_country"
+   "_shipping_phone"
+   "_first_name" "_last_name"
+   "_address" "_city" "_state" "_country" "_zip" "_postal"
+   "_phone" "_telephone" "_fax" "_mobile"])
+
+;; ---------------------------------------------------------------------------
+;; Pure validation and anonymization functions
+;; ---------------------------------------------------------------------------
+
+(defn sha-prefix [value length]
+  (php/substr (php/hash "sha256" value) 0 length))
+
+(defn email-hash [email]
+  (sha-prefix (s/lower-case email) 12))
+
+(defn url-hash [url]
+  (sha-prefix url 12))
+
+(defn valid-email? [email]
+  (= 1 (php/preg_match #"^[^@\s]+@[^@\s]+\.[^@\s]+$" email)))
+
+(defn personal-email? [email]
+  (let [low             (s/lower-case email)
+        system-prefixes ["noreply@" "no-reply@" "donotreply@" "wordpress@" "wp@"
+                         "mailer@" "system@" "bot@" "robot@" "do-not-reply@"]]
+    (not (some #(s/starts-with? low %) system-prefixes))))
+
+(defn valid-url? [url]
+  (let [parts (php/parse_url url)]
+    (and
+     (not (false? parts))
+     (contains? #{"http" "https"} (php/aget parts "scheme"))
+     (not (empty? (or (php/aget parts "host") ""))))))
+
+(defn expand-ipv6 [ip]
+  (let [halves      (s/split ip #"::" -1)
+        compressed? (s/contains? ip "::")
+        left        (if compressed?
+                      (if (empty? (first halves)) [] (s/split (first halves) #":" -1))
+                      (s/split ip #":" -1))
+        right       (if compressed?
+                      (let [value (or (second halves) "")]
+                        (if (empty? value) [] (s/split value #":" -1)))
+                      [])
+        missing     (- 8 (count left) (count right))
+        groups      (if compressed?
+                      (concat left (repeat (max 0 missing) "0") right)
+                      left)]
+    (if (= 8 (count groups))
+      (s/join ":" (map #(php/str_pad % 4 "0" php/STR_PAD_LEFT) groups))
+      ip)))
+
+(defn valid-ipv6? [ip]
+  (let [groups (s/split (expand-ipv6 ip) #":" -1)]
+    (and
+     (= 8 (count groups))
+     (every? #(= 1 (php/preg_match #"^[0-9a-fA-F]{0,4}$" %)) groups))))
+
+(defn valid-ipv4? [ip]
+  (let [parts (s/split ip #"\." -1)]
+    (and
+     (= 4 (count parts))
+     (every? (fn [part]
+               (and
+                (= 1 (php/preg_match #"^\d+$" part))
+                (<= 0 (php/intval part) 255)))
+             parts))))
+
+(defn valid-ip? [ip]
+  (or (valid-ipv4? ip) (valid-ipv6? ip)))
+
+(defn partial-ip [ip]
+  (cond
+    (valid-ipv4? ip)
+    (let [parts (s/split ip #"\." -1)]
+      (str (first parts) "." (second parts) ".xxx.xxx"))
+
+    (valid-ipv6? ip)
+    (let [groups (s/split (expand-ipv6 ip) #":" -1)]
+      (str (s/join ":" (take 4 groups)) ":xxxx:xxxx:xxxx:xxxx"))
+
+    (str "[redacted-" (php/substr ip 0 8) "...]")))
+
+;; ---------------------------------------------------------------------------
+;; Persistent replacement registries
+;; ---------------------------------------------------------------------------
+
+(defn empty-registry []
+  {:index {} :entries []})
+
+(defn empty-replacements []
+  {:emails (empty-registry)
+   :urls (empty-registry)
+   :ips (empty-registry)})
+
+(defn registry-contains? [replacements kind original]
+  (contains? (get-in replacements [kind :index]) original))
+
+(defn replacement-entries [replacements kind]
+  (get-in replacements [kind :entries] []))
+
+(defn replacement-count [replacements kind]
+  (count (replacement-entries replacements kind)))
+
+(defn replacement-stats [replacements]
+  (format "emails=%d  urls=%d  ips=%d"
+          (replacement-count replacements :emails)
+          (replacement-count replacements :urls)
+          (replacement-count replacements :ips)))
+
+(defn- register-replacement [replacements kind original normalized valid? replacement-fn]
+  (let [registry (get replacements kind)
+        index    (get registry :index)]
+    (cond
+      (contains? index normalized)
+      [replacements (get index normalized)]
+
+      (and (not (empty? normalized)) valid?)
+      (let [replacement   (replacement-fn normalized)
+            next-registry (-> registry
+                              (assoc-in [:index normalized] replacement)
+                              (update :entries conj [normalized replacement]))]
+        [(assoc replacements kind next-registry) replacement])
+
+      [replacements original])))
+
+(defn register-email [replacements email]
+  (let [normalized (s/lower-case (s/trim email))]
+    (register-replacement
+     replacements
+     :emails
+     email
+     normalized
+     (and (valid-email? normalized) (personal-email? normalized))
+     #(str "anon-" (email-hash %) "@localhost.localdomain"))))
+
+(defn register-url [replacements url]
+  (let [normalized (s/trim url)]
+    (register-replacement
+     replacements
+     :urls
+     normalized
+     normalized
+     (valid-url? normalized)
+     #(str "https://redacted.example.invalid/path/" (url-hash %)))))
+
+(defn register-ip [replacements ip]
+  (let [normalized (s/trim ip)]
+    (register-replacement
+     replacements
+     :ips
+     normalized
+     normalized
+     (valid-ip? normalized)
+     partial-ip)))
+
+(defn scan-value [replacements pii-type options value]
+  (case pii-type
+    :email (first (register-email replacements value))
+    :url   (if (get options :redact-urls)
+             (first (register-url replacements value))
+             replacements)
+    :ip    (if (and (get options :redact-ips) (valid-ip? value))
+             (first (register-ip replacements value))
+             replacements)
+    replacements))
+
+;; ---------------------------------------------------------------------------
+;; Discovery data shaping
+;; ---------------------------------------------------------------------------
+
+(defn- row-matches [[table column]]
+  (let [lower-column (s/lower-case column)]
+    (keep (fn [[pii-type pattern]]
+            (when (= 1 (php/preg_match pattern lower-column))
+              {:table table :type pii-type :column column}))
+          pii-patterns)))
+
+(defn classify-columns [rows]
+  (let [matches     (mapcat row-matches rows)
+        table-names (distinct (map :table matches))]
+    (map
+     (fn [table]
+       (let [table-matches (filter #(= table (:table %)) matches)
+             types         (distinct (map :type table-matches))]
+         {:table table
+          :groups (map
+                   (fn [pii-type]
+                     {:type pii-type
+                      :columns (map :column
+                                    (filter #(= pii-type (:type %)) table-matches))})
+                   types)}))
+     table-names)))
+
+(defn selected-table? [options table]
+  (let [selected (get options :table)]
+    (or (nil? selected) (= selected table))))
+
+(defn find-table [tables table-name]
+  (find #(= table-name (:table %)) tables))
+
+(defn columns-for [tables table-name pii-type]
+  (if-let [table (find-table tables table-name)]
+    (if-let [group (find #(= pii-type (:type %)) (:groups table))]
+      (get group :columns)
+      [])
+    []))
+
+(defn identifier [name]
+  (str "`" (s/replace name "`" "``") "`"))
+
+;; ---------------------------------------------------------------------------
+;; Query plans: immutable data, interpreted only at the PDO boundary
+;; ---------------------------------------------------------------------------
+
+(defn new-plan [replacements]
+  {:replacements replacements
+   :queries []
+   :changes []})
+
+(defn add-query [plan sql params]
+  (update plan :queries conj {:sql sql :params params}))
+
+(defn add-change [plan change]
+  (update plan :changes conj change))
+
+(defn add-operation [plan sql params change]
+  (add-change (add-query plan sql params) change))
+
+(defn add-changes [plan changes]
+  (reduce add-change plan changes))
+
+(defn- plan-registry-column [plan table column pii-type kind]
+  (let [table-id  (identifier table)
+        column-id (identifier column)
+        sql       (str "UPDATE " table-id " SET " column-id "=? WHERE " column-id "=?")]
+    (reduce
+     (fn [current [original replacement]]
+       (add-operation
+        current
+        sql
+        [replacement original]
+        {:table table
+         :column column
+         :type pii-type
+         :original original
+         :new replacement}))
+     plan
+     (replacement-entries (get plan :replacements) kind))))
+
+(defn plan-column [plan options table column pii-type]
+  (cond
+    (= pii-type :email)
+    (plan-registry-column plan table column :email :emails)
+
+    (and (= pii-type :url) (get options :redact-urls))
+    (plan-registry-column plan table column :url :urls)
+
+    (and (= pii-type :ip) (get options :redact-ips))
+    (plan-registry-column plan table column :ip :ips)
+
+    (and (contains? #{:name :phone :address} pii-type)
+         (or (not= pii-type :name) (:redact-names options))
+         (not (and (= table "wp_users") (= column "display_name"))))
+    (let [placeholder (if (= pii-type :name) "Anonymous" "[REDACTED]")
+          column-id   (identifier column)
+          sql         (str "UPDATE " (identifier table) " SET " column-id "=?"
+                           " WHERE " column-id " != '' AND " column-id " != ?")]
+      (add-operation
+       plan
+       sql
+       [placeholder placeholder]
+       {:table table
+        :column column
+        :type pii-type
+        :placeholder placeholder}))
+
+    plan))
+
+(defn plan-table-updates [plan options tables]
+  (reduce
+   (fn [current table-spec]
+     (if-not (selected-table? options (:table table-spec))
+       current
+       (reduce
+        (fn [table-plan group]
+          (reduce
+           #(plan-column %1 options (:table table-spec) %2 (:type group))
+           table-plan
+           (:columns group)))
+        current
+        (:groups table-spec))))
+   plan
+   tables))
+
+(defn plan-usermeta-updates [plan options meta-keys]
+  (reduce
+   (fn [current meta-key]
+     (cond
+       (and (:redact-names options)
+            (contains? #{"first_name" "last_name" "nickname"} meta-key))
+       (add-operation
+        current
+        "UPDATE wp_usermeta SET meta_value=? WHERE meta_key=? AND meta_value != ''"
+        ["Anonymous" meta-key]
+        {:table "wp_usermeta"
+         :meta_key meta-key
+         :type :name
+         :placeholder "Anonymous"})
+
+       (contains? #{"description" "biography" "description_en"} meta-key)
+       (add-operation
+        current
+        "UPDATE wp_usermeta SET meta_value=? WHERE meta_key=? AND meta_value != ''"
+        ["[REDACTED]" meta-key]
+        {:table "wp_usermeta"
+         :meta_key meta-key
+         :type :description
+         :placeholder "[REDACTED]"})
+
+       current))
+   plan
+   meta-keys))
+
+(defn whitelisted? [options login]
+  (contains? (set (map s/lower-case (:whitelist-users options [])))
+             (s/lower-case login)))
+
+(defn comment-authors-to-redact [user-logins display-names authors]
+  (let [known-names (set (map s/lower-case (concat user-logins display-names)))]
+    (filter
+     (fn [author]
+       (and
+        (not (some #(s/contains? author %) ["&#" "&lt;" "&gt;"]))
+        (contains? known-names (s/lower-case author))))
+     authors)))
+
+(defn- present-or [value fallback]
+  (if (empty? (or value "")) fallback value))
+
+(defn plan-login-updates [plan options tables users]
+  (let [login-columns    (columns-for tables "wp_users" :login)
+        login-column-set (set login-columns)]
+    (if (empty? login-columns)
+      plan
+      (let [planned
+            (reduce
+             (fn [current user]
+               (let [login (get user :login)]
+                 (if (whitelisted? options login)
+                   current
+                   (let [id            (get user :id)
+                         new-login     (str "anon-" (sha-prefix login 8))
+                         with-login
+                         (if (contains? login-column-set "user_login")
+                           (add-operation
+                            current
+                            "UPDATE wp_users SET user_login=? WHERE ID=?"
+                            [new-login id]
+                            {:table "wp_users"
+                             :column "user_login"
+                             :type :login
+                             :original login
+                             :new new-login})
+                           current)
+                         with-nicename
+                         (if (contains? login-column-set "user_nicename")
+                           (add-operation
+                            with-login
+                            "UPDATE wp_users SET user_nicename=? WHERE ID=?"
+                            [new-login id]
+                            {:table "wp_users"
+                             :column "user_nicename"
+                             :type :login
+                             :original (present-or (get user :nicename) login)
+                             :new new-login})
+                           with-login)]
+                     (if (contains? login-column-set "display_name")
+                       (add-operation
+                        with-nicename
+                        "UPDATE wp_users SET display_name=? WHERE ID=?"
+                        ["Anonymous" id]
+                        {:table "wp_users"
+                         :column "display_name"
+                         :type :display_name
+                         :original (present-or (get user :display-name) login)
+                         :new "Anonymous"})
+                       with-nicename)))))
+             plan
+             users)
+            ids     (map :id
+                         (remove #(whitelisted? options (:login %)) users))]
+        (if (and
+             (contains? login-column-set "user_pass")
+             (not (empty? ids)))
+          (add-operation
+           planned
+           (str "UPDATE wp_users SET user_pass='*' WHERE ID IN ("
+                (s/join "," (repeat (count ids) "?")) ")")
+           ids
+           {:table "wp_users"
+            :column "user_pass"
+            :type :user_pass
+            :count (count ids)})
+          planned)))))
+
+(defn plan-comment-author-updates [plan authors]
+  (reduce
+   (fn [current author]
+     (add-operation
+      current
+      "UPDATE wp_comments SET comment_author=? WHERE comment_author=?"
+      ["Anonymous" author]
+      {:table "wp_comments"
+       :column "comment_author"
+       :type :comment_author
+       :original author
+       :new "Anonymous"}))
+   plan
+   authors))
+
+(defn- register-plan-value [plan register-fn value]
+  (let [[replacements replacement]
+        (register-fn (get plan :replacements) value)]
+    [(assoc plan :replacements replacements) replacement]))
+
+(defn plan-postmeta-values [plan options meta-key values]
+  (reduce
+   (fn [current value]
+     (let [trimmed                 (s/trim value)
+           [next-plan replacement]
+           (cond
+             (valid-email? trimmed)
+             (register-plan-value current register-email trimmed)
+
+             (and (get options :redact-urls) (valid-url? trimmed))
+             (register-plan-value current register-url trimmed)
+
+             [current trimmed])]
+       (if (= replacement trimmed)
+         next-plan
+         (add-operation
+          next-plan
+          "UPDATE wp_postmeta SET meta_value=? WHERE meta_key=? AND meta_value=?"
+          [replacement meta-key trimmed]
+          {:table "wp_postmeta"
+           :meta_key meta-key
+           :original trimmed
+           :new replacement}))))
+   plan
+   values))
+
+(defn- redact-known-emails [acc option-name]
+  (reduce
+   (fn [current [original replacement]]
+     (let [value (get current :value)]
+       (if (s/contains? value original)
+         {:plan (add-change
+                 (get current :plan)
+                 {:table "wp_options"
+                  :column option-name
+                  :type :email
+                  :original original
+                  :new replacement})
+          :value (s/replace value original replacement)}
+         current)))
+   acc
+   (replacement-entries (get-in acc [:plan :replacements]) :emails)))
+
+(defn- redact-known-urls [acc]
+  (reduce
+   (fn [current [original replacement]]
+     (let [value (get current :value)]
+       (if (s/contains? value original)
+         (assoc current :value (s/replace value original replacement))
+         current)))
+   acc
+   (replacement-entries (get-in acc [:plan :replacements]) :urls)))
+
+(defn- redact-new-option-emails [acc option-name]
+  (reduce
+   (fn [current email]
+     (let [normalized (s/lower-case email)
+           plan       (get current :plan)]
+       (if (and
+            (valid-email? email)
+            (personal-email? email)
+            (not (registry-contains? (get plan :replacements) :emails normalized)))
+         (let [[next-plan replacement] (register-plan-value plan register-email email)]
+           (if (= replacement email)
+             current
+             {:plan (add-change
+                     next-plan
+                     {:table "wp_options"
+                      :column option-name
+                      :type :email
+                      :original email
+                      :new replacement})
+              :value (s/replace-first (get current :value) email replacement)}))
+         current)))
+   acc
+   (distinct (re-seq email-re (get acc :value)))))
+
+(defn plan-wpml-cache [plan rows]
+  (reduce
+   (fn [current row]
+     (let [option-name  (get row :name)
+           option-value (get row :value)]
+       (if (empty? option-value)
+         current
+         (let [initial      {:plan current :value option-value}
+               known-emails (redact-known-emails initial option-name)
+               known-urls   (redact-known-urls known-emails)
+               redacted     (redact-new-option-emails known-urls option-name)]
+           (add-query
+            (:plan redacted)
+            "UPDATE wp_options SET option_value=? WHERE option_name=?"
+            [(:value redacted) option-name])))))
+   plan
+   rows))
+
+(defn- redact-wxr-known-emails [acc meta-id]
+  (reduce
+   (fn [current [original replacement]]
+     (let [value (get current :value)]
+       (if (s/contains? value original)
+         {:plan (add-change
+                 (get current :plan)
+                 {:table "wp_postmeta"
+                  :meta_key "_wxr_import_user_slug"
+                  :type :email
+                  :original original
+                  :new replacement
+                  :meta_id meta-id})
+          :value (s/replace-first value original replacement)}
+         current)))
+   acc
+   (replacement-entries (get-in acc [:plan :replacements]) :emails)))
+
+(defn- redact-wxr-new-emails [acc original-value meta-id]
+  (reduce
+   (fn [current email]
+     (if (and (valid-email? email) (personal-email? email))
+       (let [[next-plan replacement]
+             (register-plan-value (get current :plan) register-email email)]
+         (if (and
+              (not (= replacement email))
+              (not (s/contains? (get current :value) replacement)))
+           {:plan (add-change
+                   next-plan
+                   {:table "wp_postmeta"
+                    :meta_key "_wxr_import_user_slug"
+                    :type :email
+                    :original email
+                    :new replacement
+                    :meta_id meta-id})
+            :value (s/replace-first (get current :value) email replacement)}
+           (assoc current :plan next-plan)))
+       current))
+   acc
+   (distinct (re-seq email-re original-value))))
+
+(defn plan-wxr-imports [plan rows]
+  (reduce
+   (fn [current row]
+     (let [meta-id        (get row :id)
+           original-value (get row :value)]
+       (if (empty? original-value)
+         current
+         (let [initial           {:plan current :value original-value}
+               with-known-emails (redact-wxr-known-emails initial meta-id)
+               with-new-emails   (redact-wxr-new-emails
+                                  with-known-emails original-value meta-id)
+               redacted          (if (and
+                                      (empty? (re-seq email-re original-value))
+                                      (not (contains? #{"" "[REDACTED]"} original-value)))
+                                   {:plan (add-change
+                                           (:plan with-new-emails)
+                                           {:table "wp_postmeta"
+                                            :meta_key "_wxr_import_user_slug"
+                                            :type :import_slug
+                                            :original original-value
+                                            :new "[REDACTED]"
+                                            :meta_id meta-id})
+                                    :value "[REDACTED]"}
+                                   with-new-emails)]
+           (add-query
+            (:plan redacted)
+            "UPDATE wp_postmeta SET meta_value=? WHERE meta_id=?"
+            [(:value redacted) meta-id])))))
+   plan
+   rows))
+
+(defn plan-stream-truncate [plan row-count]
+  (if (zero? row-count)
+    plan
+    (add-operation
+     plan
+     "TRUNCATE TABLE wp_stream"
+     []
+     {:table "wp_stream"
+      :column "all"
+      :type :truncate
+      :count row-count})))
+
+;; ---------------------------------------------------------------------------
+;; Query rendering and summaries
+;; ---------------------------------------------------------------------------
+
+(defn- sql-literal [pdo value]
+  (cond
+    (nil? value) "NULL"
+    (number? value) (str value)
+    (true? value) "1"
+    (false? value) "0"
+    (php/-> pdo (quote (str value)))))
+
+(defn render-query [pdo query]
+  # Split before inserting values so a '?' inside a quoted value cannot be
+  # mistaken for the next placeholder.
+  (let [parts (s/split (get query :sql) "/\?/" -1)]
+    (loop [rendered        (first parts)
+           remaining-parts (next parts)
+           params          (get query :params)]
+      (if (empty? params)
+        rendered
+        (recur
+         (str rendered
+              (sql-literal pdo (first params))
+              (first remaining-parts))
+         (next remaining-parts)
+         (next params))))))
+
+(defn changes-for [plan pred]
+  (filter pred (get plan :changes)))
+
+(defn changes-by-table [plan]
+  (frequencies (map :table (:changes plan))))

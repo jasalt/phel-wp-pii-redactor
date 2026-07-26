@@ -1,0 +1,303 @@
+(ns pii.redactor.main
+  (:require phel.cli :as cli)
+  (:require phel.string :as s)
+  (:require pii.redactor.core :as core)
+  (:require pii.redactor.db :as db))
+
+;; ---------------------------------------------------------------------------
+;; Logging
+;; ---------------------------------------------------------------------------
+
+(defn log! [level message & args]
+  (let [rendered (if (empty? args) message (apply format message args))]
+    (php/fwrite php/STDERR
+                (str (php/date "H:i:s") " [" level "] " rendered "\n"))))
+
+(defn info! [message & args]
+  (apply log! "INFO" message args))
+
+(defn error! [message & args]
+  (apply log! "ERROR" message args))
+
+;; ---------------------------------------------------------------------------
+;; CLI data
+;; ---------------------------------------------------------------------------
+
+(defn- whitelist [raw]
+  (if (s/blank? raw)
+    []
+    (->> (s/split raw #",")
+         (map s/trim)
+         (remove s/blank?)
+         vec)))
+
+(defn options-from [ctx]
+  {:config (cli/opt ctx "config")
+   :dry-run (boolean (cli/opt ctx "dry-run"))
+   :verbose (boolean (cli/opt ctx "verbose"))
+   :redact-names (not (boolean (cli/opt ctx "no-names")))
+   :redact-urls (not (boolean (cli/opt ctx "no-urls")))
+   :redact-ips (not (boolean (cli/opt ctx "no-ips")))
+   :redact-options (boolean (cli/opt ctx "redact-options"))
+   :table (cli/opt ctx "table")
+   :summary (boolean (cli/opt ctx "summary"))
+   :whitelist-users (whitelist (cli/opt ctx "whitelist-users"))})
+
+(defn- absolute-path [path]
+  (if (s/starts-with? path "/")
+    path
+    (str (php/getcwd) "/" path)))
+
+;; ---------------------------------------------------------------------------
+;; Discovery and scan phase
+;; ---------------------------------------------------------------------------
+
+(defn- group-label [group]
+  (str (name (:type group)) "=['" (s/join "', '" (:columns group)) "']"))
+
+(defn log-discovery! [options discovery]
+  (info! "Discovered PII tables:")
+  (doseq [table-spec :in (:tables discovery)
+          :when (core/selected-table? options (:table table-spec))]
+    (info! "  %-40s %s"
+           (:table table-spec)
+           (s/join " | " (map group-label (:groups table-spec)))))
+  (let [postmeta (:postmeta-keys discovery)
+        usermeta (:usermeta-keys discovery)]
+    (when-not (empty? postmeta)
+      (info! "Personal postmeta keys (%d): %s"
+             (count postmeta)
+             (str (s/join ", " (take 15 postmeta))
+                  (if (> (count postmeta) 15) "..." ""))))
+    (when-not (empty? usermeta)
+      (info! "Personal usermeta keys (%d): %s"
+             (count usermeta)
+             (str (s/join ", " (take 15 usermeta))
+                  (if (> (count usermeta) 15) "..." ""))))))
+
+(defn- scan-column [pdo options replacements table column pii-type]
+  (let [values (db/distinct-column-values pdo table column)]
+    (when (and (:verbose options) (not (empty? values)))
+      (info! "  %-40s %-20s %s: %d distinct values"
+             table column (name pii-type) (count values)))
+    (reduce
+     #(core/scan-value %1 pii-type options (s/trim %2))
+     replacements
+     values)))
+
+(defn- scan-table [pdo options replacements table-spec]
+  (reduce
+   (fn [current group]
+     (reduce
+      #(scan-column pdo
+        options
+        %1
+        (:table table-spec)
+        %2
+        (:type group))
+      current
+      (:columns group)))
+   replacements
+   (:groups table-spec)))
+
+(defn scan-replacements [pdo options tables]
+  (reduce
+   #(if (core/selected-table? options (:table %2))
+     (scan-table pdo options %1 %2)
+     %1)
+   (core/empty-replacements)
+   tables))
+
+(defn log-meta-counts! [pdo options discovery]
+  (when (:verbose options)
+    (doseq [meta-key :in (:usermeta-keys discovery)]
+      (info! "  wp_usermeta[%s] has %d non-empty values"
+             meta-key (db/meta-count pdo "wp_usermeta" meta-key)))
+    (doseq [meta-key :in (:postmeta-keys discovery)]
+      (info! "  wp_postmeta[%s] has %d non-empty values"
+             meta-key (db/meta-count pdo "wp_postmeta" meta-key)))))
+
+(defn- comment-authors [pdo users]
+  (core/comment-authors-to-redact
+   (map :login users)
+   (db/load-display-names pdo)
+   (db/load-approved-comment-authors pdo)))
+
+;; ---------------------------------------------------------------------------
+;; Plan phase
+;; ---------------------------------------------------------------------------
+
+(defn- plan-postmeta [plan pdo options meta-keys]
+  (reduce
+   #(core/plan-postmeta-values
+     %1
+     options
+     %2
+     (db/distinct-meta-values pdo "wp_postmeta" %2))
+   plan
+   meta-keys))
+
+(defn- option-email-change? [change]
+  (and (= "wp_options" (:table change)) (= :email (:type change))))
+
+(defn- wxr-change? [change]
+  (and (= "wp_postmeta" (:table change))
+       (= "_wxr_import_user_slug" (:meta_key change))))
+
+(defn- plan-residuals [plan pdo options]
+  (let [wpml-rows  (db/wpml-cache-rows pdo)
+        with-wpml  (core/plan-wpml-cache plan wpml-rows)
+        wpml-count (count (core/changes-for with-wpml option-email-change?))]
+    (when (and (:verbose options) (empty? wpml-rows))
+      (info! "wp_options: no WPML translator cache options found"))
+    (when (and (:verbose options) (pos? wpml-count))
+      (info! "wp_options: WPML cache PII redacted (%d email replacements)" wpml-count))
+    (let [wxr-rows  (db/wxr-import-rows pdo)
+          with-wxr  (core/plan-wxr-imports with-wpml wxr-rows)
+          wxr-count (count (core/changes-for with-wxr wxr-change?))]
+      (when (and (:verbose options) (empty? wxr-rows))
+        (info! "wp_postmeta: no _wxr_import_user_slug entries found"))
+      (when (and (:verbose options) (pos? wxr-count))
+        (info! "wp_postmeta: _wxr_import_user_slug redacted (%d entries)" wxr-count))
+      (let [stream-count (db/stream-count pdo)]
+        (if (zero? stream-count)
+          (when (:verbose options)
+            (info! "wp_stream: already empty"))
+          (info! "wp_stream: will truncate %d audit log entries" stream-count))
+        (core/plan-stream-truncate with-wxr stream-count)))))
+
+(defn build-plan [pdo options discovery replacements users authors]
+  (when (:verbose options)
+    (doseq [user :in users :when (core/whitelisted? options (:login user))]
+      (info! "  Skipping whitelisted user: %s" (:login user))))
+  (let [table-plan    (core/plan-table-updates
+                       (core/new-plan replacements) options (:tables discovery))
+        usermeta-plan (core/plan-usermeta-updates
+                       table-plan options (:usermeta-keys discovery))
+        login-plan    (core/plan-login-updates
+                       usermeta-plan options (:tables discovery) users)
+        comment-plan  (core/plan-comment-author-updates login-plan authors)
+        postmeta-plan (plan-postmeta
+                       comment-plan pdo options (:postmeta-keys discovery))]
+    (plan-residuals postmeta-plan pdo options)))
+
+;; ---------------------------------------------------------------------------
+;; Execute/preview phase
+;; ---------------------------------------------------------------------------
+
+(defn- log-summary! [plan]
+  (info! "=== Summary ===")
+  (let [by-table (core/changes-by-table plan)]
+    (doseq [table :in (sort (keys by-table))]
+      (info! "  %-40s %d change(s)" table (get by-table table)))))
+
+(defn finish-plan! [pdo options plan]
+  (let [queries (:queries plan)]
+    (if (:dry-run options)
+      (do
+        (info! "Would execute %d UPDATE queries" (count queries))
+        (doseq [query :in (take 25 queries)]
+          (info! "  %s" (core/render-query pdo query)))
+        (when (> (count queries) 25)
+          (info! "  ... and %d more" (- (count queries) 25))))
+      (if (empty? queries)
+        (info! "Nothing to do.")
+        (do
+          (info! "Executing %d UPDATE queries inside a transaction..." (count queries))
+          (let [affected (db/execute-queries! pdo queries)]
+            (info! "Transaction complete. Total affected rows: %d" affected))
+          (log-summary! plan))))))
+
+(defn log-locations! [tables]
+  (doseq [table-spec :in tables
+          group :in (:groups table-spec)
+          column :in (:columns group)]
+    (info! "%-40s %-10s %s"
+           (:table table-spec)
+           (name (:type group))
+           column)))
+
+(defn run-redactor [options]
+  (let [config-path (absolute-path (:config options))
+        config      (db/parse-wp-config config-path)]
+    (info! "DB credentials: host=%s  name=%s  user=%s"
+           (:host config) (:name config) (:user config))
+    (when (:dry-run options)
+      (info! "=== DRY RUN MODE (no changes will be written) ==="))
+    (let [pdo       (db/connect config)
+          discovery {:tables (db/discover-pii-tables pdo (:name config))
+                     :usermeta-keys (db/discover-usermeta-keys pdo)
+                     :postmeta-keys (db/discover-postmeta-keys pdo)}]
+      (if (:summary options)
+        (do (log-locations! (:tables discovery)) 0)
+        (do
+          (log-discovery! options discovery)
+          (let [users   (db/load-users pdo)
+                authors (comment-authors pdo users)]
+            (when (:verbose options)
+              (info! "Loaded %d user_logins for whitelist check" (count users))
+              (when-not (empty? authors)
+                (info! "Comment authors to redact (%d): %s"
+                       (count authors) (s/join ", " authors))))
+            (let [replacements (scan-replacements pdo options (:tables discovery))]
+              (log-meta-counts! pdo options discovery)
+              (let [public-email-count (db/published-email-count pdo)]
+                (when (pos? public-email-count)
+                  (info! (str "wp_posts.post_content: %d published posts contain email patterns "
+                              "(skipped — public content)")
+                         public-email-count)))
+              (info! "Replacement map: %s" (core/replacement-stats replacements))
+              (let [plan (build-plan pdo options discovery replacements users authors)]
+                (finish-plan! pdo options plan)
+                (when-not (empty? (:whitelist-users options))
+                  (info! "Whitelisted users (skipped): %s"
+                         (s/join ", " (sort (:whitelist-users options)))))
+                (info! "Redaction complete. Changes: %d" (count (:changes plan)))
+                0))))))))
+
+(defn- run-command [ctx]
+  (try
+    (run-redactor (options-from ctx))
+    (catch \Throwable exception
+      (error! "%s" (.getMessage exception))
+      1)))
+
+(def app
+  (cli/application
+   {:name "pii-redactor"
+    :version "1.0.0"
+    :default "redact"
+    :commands
+    [{:name "redact"
+      :doc "Anonymize non-public PII in a WordPress database"
+      :help (str "Discovers PII columns and creates a deterministic, transactional "
+                 "redaction plan. Use --dry-run before every live run.")
+      :opts [{:name "config"
+              :mode :required
+              :default "wp-config.php"
+              :doc "Path to wp-config.php"}
+             {:name "dry-run"
+              :mode :none
+              :doc "Show changes without writing"}
+             {:name "no-names"
+              :mode :none
+              :doc "Skip name fields"}
+             {:name "no-urls"
+              :mode :none
+              :doc "Skip URL fields"}
+             {:name "no-ips"
+              :mode :none
+              :doc "Skip IP addresses"}
+             {:name "redact-options"
+              :mode :none
+              :doc "Also redact supported wp_options cache data"}
+             {:name "table"
+              :mode :required
+              :doc "Restrict generic discovery to one table"}
+             {:name "summary"
+              :mode :none
+              :doc "Print PII locations without redacting"}
+             {:name "whitelist-users"
+              :mode :required
+              :doc "Comma-separated user_login values to preserve"}]
+      :run run-command}]}))

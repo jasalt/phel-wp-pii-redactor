@@ -1,0 +1,204 @@
+(ns pii.redactor.db
+  (:require phel.string :as s)
+  (:require pii.redactor.core :as core))
+
+;; ---------------------------------------------------------------------------
+;; WordPress configuration and PDO boundary
+;; ---------------------------------------------------------------------------
+
+(def config-re
+  #"define\s*\(\s*['\"]DB_(HOST|NAME|USER|PASSWORD)['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*\)")
+
+(def config-keys
+  {"HOST" :host
+   "NAME" :name
+   "USER" :user
+   "PASSWORD" :password})
+
+(defn parse-wp-config [path]
+  (when-not (php/is_file path)
+    (throw (php/new \RuntimeException (str "Config file not found: " path))))
+  (let [lines   (vec (php/file path php/FILE_IGNORE_NEW_LINES))
+        config
+        (reduce
+         (fn [current line]
+           (let [matches (php/array)]
+             (if (= 1 (php/preg_match config-re line matches))
+               (assoc current
+                      (get config-keys (php/aget matches 1))
+                      (php/aget matches 2))
+               current)))
+         {}
+         lines)
+        missing (find #(not (contains? config %)) [:host :name :user :password])]
+    (when missing
+      (throw
+       (php/new \RuntimeException
+                (str "Missing DB_" (s/upper-case (name missing)) " in " path))))
+    config))
+
+(defn- connection-parts [host]
+  (let [matches (php/array)]
+    (if (= 1 (php/preg_match #"^(.+):(\d+)$" host matches))
+      {:host (php/aget matches 1)
+       :port (php/intval (php/aget matches 2))}
+      {:host host})))
+
+(defn connect [config]
+  (let [parts      (connection-parts (get config :host))
+        dsn        (str "mysql:host=" (get parts :host)
+                        ";dbname=" (get config :name)
+                        (if (contains? parts :port) (str ";port=" (get parts :port)) "")
+                        ";charset=utf8mb4")
+        attributes
+        #php{(php/:: \PDO ATTR_ERRMODE) (php/:: \PDO ERRMODE_EXCEPTION)
+              (php/:: \PDO ATTR_DEFAULT_FETCH_MODE) (php/:: \PDO FETCH_NUM)
+              (php/:: \PDO ATTR_EMULATE_PREPARES) false}]
+    (php/new \PDO dsn (get config :user) (get config :password) attributes)))
+
+(defn fetch [pdo sql & [params]]
+  (let [statement (.prepare pdo sql)]
+    (.execute statement (to-php-array (or params [])))
+    (vec (map vec (.fetchAll statement (php/:: \PDO FETCH_NUM))))))
+
+(defn fetch-value [pdo sql & [params]]
+  (let [statement (.prepare pdo sql)]
+    (.execute statement (to-php-array (or params [])))
+    (let [value (.fetchColumn statement)]
+      (if (false? value) nil value))))
+
+;; ---------------------------------------------------------------------------
+;; Discovery and read models
+;; ---------------------------------------------------------------------------
+
+(defn discover-pii-tables [pdo db-name]
+  (->> (fetch
+        pdo
+        "SELECT table_name, column_name FROM information_schema.columns
+          WHERE table_schema=? AND table_name LIKE 'wp_%'
+          AND table_name NOT LIKE '%_tmp' AND table_name NOT LIKE '%_backup'
+          ORDER BY table_name, column_name"
+        [db-name])
+       (core/classify-columns)))
+
+(defn discover-usermeta-keys [pdo]
+  (map first
+       (fetch
+        pdo
+        "SELECT DISTINCT meta_key FROM wp_usermeta WHERE meta_key REGEXP ?"
+        [core/usermeta-re])))
+
+(defn discover-postmeta-keys [pdo]
+  (let [placeholders (s/join "," (repeat (count core/postmeta-keys) "?"))]
+    (map first
+         (fetch
+          pdo
+          (str "SELECT DISTINCT meta_key FROM wp_postmeta WHERE meta_key IN ("
+               placeholders ")")
+          core/postmeta-keys))))
+
+(defn load-users [pdo]
+  (map
+   (fn [[id login nicename display-name]]
+     {:id (php/intval id)
+      :login login
+      :nicename nicename
+      :display-name display-name})
+   (fetch
+    pdo
+    "SELECT ID, user_login, user_nicename, display_name FROM wp_users
+       WHERE user_login != '' AND user_login IS NOT NULL")))
+
+(defn load-user-logins [pdo]
+  (map first
+       (fetch pdo "SELECT DISTINCT user_login FROM wp_users WHERE user_login != ''")))
+
+(defn load-display-names [pdo]
+  (map first
+       (fetch pdo "SELECT DISTINCT display_name FROM wp_users WHERE display_name != ''")))
+
+(defn load-approved-comment-authors [pdo]
+  (map first
+       (fetch
+        pdo
+        "SELECT DISTINCT comment_author FROM wp_comments
+          WHERE comment_approved='1' AND comment_author != ''")))
+
+(defn distinct-column-values [pdo table column]
+  (map first
+       (fetch
+        pdo
+        (str "SELECT DISTINCT " (core/identifier column)
+             " FROM " (core/identifier table)
+             " WHERE " (core/identifier column) " IS NOT NULL"
+             " AND " (core/identifier column) " != ''"))))
+
+(defn meta-count [pdo table meta-key]
+  (php/intval
+   (fetch-value
+    pdo
+    (str "SELECT COUNT(*) FROM " (core/identifier table)
+         " WHERE meta_key=? AND meta_value != ''")
+    [meta-key])))
+
+(defn distinct-meta-values [pdo table meta-key]
+  (map first
+       (fetch
+        pdo
+        (str "SELECT DISTINCT meta_value FROM " (core/identifier table)
+             " WHERE meta_key=? AND meta_value != ''")
+        [meta-key])))
+
+(defn published-email-count [pdo]
+  (php/intval
+   (fetch-value
+    pdo
+    "SELECT COUNT(*) FROM wp_posts
+       WHERE post_status='publish' AND post_content REGEXP ?"
+    ["[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}"])))
+
+(defn wpml-cache-rows [pdo]
+  (map
+   (fn [[name value]] {:name name :value value})
+   (fetch
+    pdo
+    "SELECT option_name, option_value FROM wp_options
+       WHERE option_name LIKE 'wpml-cache-translators-%'")))
+
+(defn wxr-import-rows [pdo]
+  (map
+   (fn [[id value]] {:id (php/intval id) :value value})
+   (fetch
+    pdo
+    "SELECT meta_id, meta_value FROM wp_postmeta
+       WHERE meta_key='_wxr_import_user_slug' AND meta_value != ''")))
+
+(defn stream-count [pdo]
+  (php/intval (fetch-value pdo "SELECT COUNT(*) FROM wp_stream")))
+
+;; ---------------------------------------------------------------------------
+;; Plan interpreter
+;; ---------------------------------------------------------------------------
+
+(defn- execute-query! [pdo query]
+  (let [statement (.prepare pdo (:sql query))]
+    (.execute statement (to-php-array (:params query)))
+    (php/intval (.rowCount statement))))
+
+(defn execute-queries! [pdo queries]
+  (php/-> pdo (exec "SET foreign_key_checks=0"))
+  (try
+    (php/-> pdo (beginTransaction))
+    (try
+      (let [affected (reduce #(+ %1 (execute-query! pdo %2)) 0 queries)]
+        ;; TRUNCATE causes an implicit commit in MySQL. Guarding the explicit
+        ;; commit preserves the legacy behavior while avoiding a PDO exception.
+        (when (php/-> pdo (inTransaction))
+          (php/-> pdo (commit)))
+        affected)
+      (catch \Throwable error
+        (when (php/-> pdo (inTransaction))
+          (php/-> pdo (rollBack)))
+        (throw error)))
+    (finally
+      (php/-> pdo (exec "SET foreign_key_checks=1")))))

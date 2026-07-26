@@ -1,0 +1,6 @@
+(ns pii.redactor.entry
+  (:require phel.cli :as cli)
+  (:require pii.redactor.main :refer [app]))
+
+(when-not *build-mode*
+  (php/exit (cli/run app (cli/argv (vec (cons "redact" *argv*))))))

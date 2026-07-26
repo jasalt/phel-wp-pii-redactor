@@ -1,0 +1,39 @@
+(ns tests.pii.redactor.db-test
+  (:require phel.test :refer [deftest is])
+  (:require pii.redactor.db :as db))
+
+(defn- temp-config [contents]
+  (let [path (php/tempnam (php/sys_get_temp_dir) "pii-redactor-test-")]
+    (php/file_put_contents path contents)
+    path))
+
+(deftest parses-wordpress-database-constants
+  (let [path (temp-config
+              (str "<?php\n"
+                   "define('DB_NAME', 'wordpress');\n"
+                   "define( \"DB_USER\", \"tester\" );\n"
+                   "define('DB_PASSWORD', 'secret');\n"
+                   "define('DB_HOST', 'db.example:3307');\n"))]
+    (try
+      (is (= {:name "wordpress"
+              :user "tester"
+              :password "secret"
+              :host "db.example:3307"}
+             (db/parse-wp-config path)))
+      (finally
+        (php/unlink path)))))
+
+(deftest rejects-a-missing-database-constant
+  (let [path (temp-config
+              (str "<?php\n"
+                   "define('DB_NAME', 'wordpress');\n"
+                   "define('DB_USER', 'tester');\n"
+                   "define('DB_HOST', 'localhost');\n"))]
+    (try
+      (is (thrown? \RuntimeException (db/parse-wp-config path)))
+      (finally
+        (php/unlink path)))))
+
+(deftest rejects-a-missing-config-file
+  (is (thrown? \RuntimeException
+               (db/parse-wp-config "/definitely/missing/wp-config.php"))))

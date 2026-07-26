@@ -1,0 +1,24 @@
+(ns tests.pii.redactor.main-test
+  (:require phel.test :refer [deftest is])
+  (:require phel.cli :as cli)
+  (:require phel.string :as s)
+  (:require pii.redactor.main :as main))
+
+(deftest cli-help-documents-safety-options
+  (let [input  (cli/argv ["--help"])
+        output (cli/buffered-output)
+        code   (cli/run main/app input output)
+        text   (cli/output->string output)]
+    (is (= 0 code))
+    (is (s/contains? text "--dry-run"))
+    (is (s/contains? text "--summary"))
+    (is (s/contains? text "--whitelist-users"))
+    (is (s/contains? text "Use --dry-run before every live run"))))
+
+(deftest cli-reports-its-version
+  (let [input  (cli/argv ["--version"])
+        output (cli/buffered-output)
+        code   (cli/run main/app input output)
+        text   (cli/output->string output)]
+    (is (= 0 code))
+    (is (s/contains? text "1.0.0"))))

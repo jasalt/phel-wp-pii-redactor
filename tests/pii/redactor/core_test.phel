@@ -1,0 +1,163 @@
+(ns tests.pii.redactor.core-test
+  (:require phel.test :refer [deftest is testing])
+  (:require phel.string :as s)
+  (:require pii.redactor.core :as core))
+
+(def default-options
+  {:redact-names true
+   :redact-urls true
+   :redact-ips true
+   :table nil
+   :whitelist-users []})
+
+(deftest deterministic-hashes
+  (is (= "ff8d9819fc0e" (core/email-hash "Alice@Example.com")))
+  (is (= "83a0d374c8ac" (core/url-hash "https://example.com/path?q=1"))))
+
+(deftest email-validation-and-registration
+  (is (core/valid-email? "alice@example.com"))
+  (is (not (core/valid-email? "not-an-email")))
+  (is (core/personal-email? "alice@example.com"))
+  (is (not (core/personal-email? "noreply@example.com")))
+  (let [[first-map first-value]
+        (core/register-email (core/empty-replacements) "Alice@Example.com")
+        [second-map second-value]
+        (core/register-email first-map "alice@example.com")
+        [system-map system-value]
+        (core/register-email second-map "noreply@example.com")]
+    (is (= "anon-ff8d9819fc0e@localhost.localdomain" first-value))
+    (is (= first-value second-value))
+    (is (= 1 (core/replacement-count second-map :emails)))
+    (is (= "noreply@example.com" system-value))
+    (is (= second-map system-map))))
+
+(deftest url-validation-and-registration
+  (is (core/valid-url? "https://example.com/path?q=1"))
+  (is (not (core/valid-url? "ftp://example.com/path")))
+  (let [[replacements value]
+        (core/register-url (core/empty-replacements) " https://example.com/path?q=1 ")]
+    (is (= "https://redacted.example.invalid/path/83a0d374c8ac" value))
+    (is (= 1 (core/replacement-count replacements :urls)))))
+
+(deftest ip-validation-and-redaction
+  (testing "IPv4"
+           (is (core/valid-ipv4? "192.168.1.42"))
+           (is (not (core/valid-ipv4? "999.168.1.42")))
+           (is (= "192.168.xxx.xxx" (core/partial-ip "192.168.1.42"))))
+  (testing "IPv6"
+           (is (core/valid-ipv6? "2001:db8::1"))
+           (is (= "2001:0db8:0000:0000:0000:0000:0000:0001"
+                  (core/expand-ipv6 "2001:db8::1")))
+           (is (= "2001:0db8:0000:0000:xxxx:xxxx:xxxx:xxxx"
+                  (core/partial-ip "2001:db8::1"))))
+  (is (not (core/valid-ip? "not-an-ip"))))
+
+(deftest column-classification-is-ordered-and-multi-valued
+  (let [tables (core/classify-columns
+                [["wp_comments" "comment_author"]
+                 ["wp_comments" "comment_author_email"]
+                 ["wp_users" "display_name"]
+                 ["wp_users" "user_login"]])]
+    (is (= ["wp_comments" "wp_users"] (vec (map :table tables))))
+    (is (= ["comment_author_email"]
+           (vec (core/columns-for tables "wp_comments" :email))))
+    (is (= ["display_name"]
+           (vec (core/columns-for tables "wp_users" :name))))
+    (is (= ["display_name" "user_login"]
+           (vec (core/columns-for tables "wp_users" :login))))))
+
+(deftest table-plans-are-data
+  (let [[with-email _]
+        (core/register-email (core/empty-replacements) "alice@example.com")
+        [replacements _]
+        (core/register-url with-email "https://example.com/profile")
+        tables           (core/classify-columns
+                          [["wp_comments" "comment_author_email"]
+                           ["wp_comments" "comment_author_url"]])
+        plan             (core/plan-table-updates
+                          (core/new-plan replacements) default-options tables)
+        queries          (:queries plan)]
+    (is (= 2 (count queries)))
+    (is (= "UPDATE `wp_comments` SET `comment_author_email`=? WHERE `comment_author_email`=?"
+           (:sql (first queries))))
+    (is (= ["anon-ff8d9819fc0e@localhost.localdomain" "alice@example.com"]
+           (:params (first queries))))
+    (is (= 2 (count (:changes plan))))))
+
+(deftest table-filter-and-name-option-shape-the-plan
+  (let [tables  (core/classify-columns
+                 [["wp_contacts" "full_name"]
+                  ["wp_contacts" "phone"]
+                  ["wp_other" "full_name"]])
+        options (assoc default-options :table "wp_contacts" :redact-names false)
+        plan    (core/plan-table-updates
+                 (core/new-plan (core/empty-replacements)) options tables)]
+    (is (= 1 (count (:queries plan))))
+    (is (= :phone (:type (first (:changes plan)))))))
+
+(deftest login-planning-honors-case-insensitive-whitelist
+  (let [tables  (core/classify-columns
+                 [["wp_users" "display_name"]
+                  ["wp_users" "user_login"]
+                  ["wp_users" "user_nicename"]
+                  ["wp_users" "user_pass"]])
+        users   [{:id 1 :login "alice" :nicename "" :display-name "Alice"}
+                 {:id 2 :login "Admin" :nicename "admin" :display-name "Administrator"}]
+        options (assoc default-options :whitelist-users ["admin"])
+        plan    (core/plan-login-updates
+                 (core/new-plan (core/empty-replacements)) options tables users)
+        queries (:queries plan)]
+    (is (= 4 (count queries)))
+    (is (= ["anon-2bd806c9" 1] (:params (first queries))))
+    (is (= ["anon-2bd806c9" 1] (:params (second queries))))
+    (is (= [1] (:params (peek queries))))
+    (is (= 4 (count (:changes plan))))))
+
+(deftest comment-author-discovery-and-planning
+  (let [authors (core/comment-authors-to-redact
+                 ["alice" "bob"]
+                 ["Alice A"]
+                 ["alice" "Alice A" "post &#8211; title" "other"])
+        plan    (core/plan-comment-author-updates
+                 (core/new-plan (core/empty-replacements)) authors)]
+    (is (= ["alice" "Alice A"] (vec authors)))
+    (is (= 2 (count (:queries plan))))))
+
+(deftest postmeta-planning-extends-the-replacement-map
+  (let [plan (core/plan-postmeta-values
+              (core/new-plan (core/empty-replacements))
+              default-options
+              "_billing_email"
+              ["Alice@Example.com"])]
+    (is (= 1 (count (:queries plan))))
+    (is (= ["anon-ff8d9819fc0e@localhost.localdomain"
+            "_billing_email"
+            "Alice@Example.com"]
+           (:params (first (:queries plan)))))
+    (is (= 1 (core/replacement-count (:replacements plan) :emails)))))
+
+(deftest residual-cache-and-import-plans-are-pure
+  (let [wpml-plan
+        (core/plan-wpml-cache
+         (core/new-plan (core/empty-replacements))
+         [{:name "wpml-cache-translators-test"
+           :value "translator=Alice@Example.com"}])
+        wpml-value (first (:params (first (:queries wpml-plan))))]
+    (is (= 1 (count (:queries wpml-plan))))
+    (is (s/contains? wpml-value "anon-ff8d9819fc0e@localhost.localdomain"))
+    (is (= 1 (count (:changes wpml-plan)))))
+  (let [wxr-plan
+        (core/plan-wxr-imports
+         (core/new-plan (core/empty-replacements))
+         [{:id 1 :value "Alice@Example.com"}
+          {:id 2 :value "legacy-user"}])]
+    (is (= 2 (count (:queries wxr-plan))))
+    (is (= 2 (count (:changes wxr-plan))))
+    (is (= ["[REDACTED]" 2] (:params (second (:queries wxr-plan)))))))
+
+(deftest stream-plan-is-explicit-data
+  (let [empty-plan (core/new-plan (core/empty-replacements))]
+    (is (= empty-plan (core/plan-stream-truncate empty-plan 0)))
+    (let [plan (core/plan-stream-truncate empty-plan 42)]
+      (is (= "TRUNCATE TABLE wp_stream" (:sql (first (:queries plan)))))
+      (is (= 42 (:count (first (:changes plan))))))))
