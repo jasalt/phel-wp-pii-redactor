@@ -33,7 +33,7 @@
     (when missing
       (throw
        (new RuntimeException
-                (str "Missing DB_" (s/upper-case (name missing)) " in " path))))
+            (str "Missing DB_" (s/upper-case (name missing)) " in " path))))
     config))
 
 (defn- connection-parts [host]
@@ -49,9 +49,9 @@
                         (if (contains? parts :port) (str ";port=" (get parts :port)) "")
                         ";charset=utf8mb4")
         attributes
-        #php{(PDO/ATTR_ERRMODE) (PDO/ERRMODE_EXCEPTION)
-             (PDO/ATTR_DEFAULT_FETCH_MODE) (PDO/FETCH_NUM)
-             (PDO/ATTR_EMULATE_PREPARES) false}]
+        #php {(PDO/ATTR_ERRMODE) (PDO/ERRMODE_EXCEPTION)
+              (PDO/ATTR_DEFAULT_FETCH_MODE) (PDO/FETCH_NUM)
+              (PDO/ATTR_EMULATE_PREPARES) false}]
     (new PDO dsn (get config :user) (get config :password) attributes)))
 
 (defn fetch [pdo sql & [params]]

@@ -39,7 +39,7 @@
 ;; ---------------------------------------------------------------------------
 
 (defn sha-prefix [value length]
-  (php/substr (php/hash "sha256" value) 0 length))
+  (s/subs (php/hash "sha256" value) 0 length))
 
 (defn email-hash [email]
   (sha-prefix (s/lower-case email) 12))
@@ -57,11 +57,11 @@
     (not (some #(s/starts-with? low %) system-prefixes))))
 
 (defn valid-url? [url]
-  (let [parts (php/parse_url url)]
+  (let [parts (php->phel (php/parse_url url))]
     (and
      (not (false? parts))
-     (contains? #{"http" "https"} (aget parts "scheme"))
-     (not (empty? (or (aget parts "host") ""))))))
+     (contains? #{"http" "https"} (get parts "scheme"))
+     (not (empty? (or (get parts "host") ""))))))
 
 (defn expand-ipv6 [ip]
   (let [halves      (s/split ip #"::" -1)
@@ -78,7 +78,7 @@
                       (concat left (repeat (max 0 missing) "0") right)
                       left)]
     (if (= 8 (count groups))
-      (s/join ":" (map #(php/str_pad % 4 "0" php/STR_PAD_LEFT) groups))
+      (s/join ":" (map #(s/pad-left % 4 "0") groups))
       ip)))
 
 (defn valid-ipv6? [ip]
@@ -110,7 +110,7 @@
     (let [groups (s/split (expand-ipv6 ip) #":" -1)]
       (str (s/join ":" (take 4 groups)) ":xxxx:xxxx:xxxx:xxxx"))
 
-    (str "[redacted-" (php/substr ip 0 8) "...]")))
+    (str "[redacted-" (s/subs ip 0 8) "...]")))
 
 ;; ---------------------------------------------------------------------------
 ;; Persistent replacement registries
