@@ -22,10 +22,10 @@
         config
         (reduce
          (fn [current line]
-           (let [matches (php/array)] ; TODO no need for php ? -> use immutable vector
+           (let [matches #php []] ; TODO use immutable datatype, not mutating in place
              (if (= 1 (php/preg_match config-re line matches))
                (assoc current
-                      (get config-keys (php/aget matches 1))
+                      (get config-keys (aget matches 1))
                       (aget matches 2))
                current)))
          {}
@@ -39,8 +39,8 @@
 
 ;; TODO convert to immutable
 (defn- connection-parts [host]
-  (let [matches (php/array)]
-    (if (= 1 (php/preg_match #"^(.+):(\d+)$" host matches))  ; php/preg_match to re-find / re-matches / re-seq
+  (let [matches #php []]
+    (if (= 1 (php/preg_match #"^(.+):(\d+)$" host matches))
       {:host (aget matches 1)
        :port (int (aget matches 2))}
       {:host host})))
@@ -183,23 +183,23 @@
 
 (defn- execute-query! [pdo query]
   (let [statement (.prepare pdo (:sql query))]
-    (.execute statement #php (:params query))
+    (.execute statement (to-php-array (:params query)))
     (int (.rowCount statement))))
 
 (defn execute-queries! [pdo queries]
-  (php/-> pdo (exec "SET foreign_key_checks=0"))
+  (.exec pdo "SET foreign_key_checks=0")
   (try
-    (php/-> pdo (beginTransaction))
+    (.beginTransaction pdo)
     (try
       (let [affected (reduce #(+ %1 (execute-query! pdo %2)) 0 queries)]
         ;; TRUNCATE causes an implicit commit in MySQL. Guarding the explicit
         ;; commit preserves the legacy behavior while avoiding a PDO exception.
-        (when (php/-> pdo (inTransaction))
-          (php/-> pdo (commit)))
+        (when (.inTransaction pdo)
+          (.commit pdo))
         affected)
-      (catch \Throwable error
-        (when (php/-> pdo (inTransaction))
-          (php/-> pdo (rollBack)))
+      (catch Throwable error
+        (when (.inTransaction pdo)
+          (.rollBack pdo))
         (throw error)))
     (finally
-      (php/-> pdo (exec "SET foreign_key_checks=1")))))
+      (.exec pdo "SET foreign_key_checks=1"))))

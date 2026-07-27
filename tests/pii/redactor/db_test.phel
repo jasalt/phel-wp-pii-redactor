@@ -30,10 +30,10 @@
                    "define('DB_USER', 'tester');\n"
                    "define('DB_HOST', 'localhost');\n"))]
     (try
-      (is (thrown? \RuntimeException (db/parse-wp-config path)))
+      (is (thrown? RuntimeException (db/parse-wp-config path)))
       (finally
         (php/unlink path)))))
 
 (deftest rejects-a-missing-config-file
-  (is (thrown? \RuntimeException
+  (is (thrown? RuntimeException
                (db/parse-wp-config "/definitely/missing/wp-config.php"))))

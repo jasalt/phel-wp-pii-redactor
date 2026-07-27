@@ -258,7 +258,7 @@
 (defn- run-command [ctx]
   (try
     (run-redactor (options-from ctx))
-    (catch \Throwable exception
+    (catch Throwable exception
       (error! "%s" (.getMessage exception))
       1)))
 

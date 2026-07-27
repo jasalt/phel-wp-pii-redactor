@@ -60,8 +60,8 @@
   (let [parts (php/parse_url url)]
     (and
      (not (false? parts))
-     (contains? #{"http" "https"} (php/aget parts "scheme"))
-     (not (empty? (or (php/aget parts "host") ""))))))
+     (contains? #{"http" "https"} (aget parts "scheme"))
+     (not (empty? (or (aget parts "host") ""))))))
 
 (defn expand-ipv6 [ip]
   (let [halves      (s/split ip #"::" -1)
@@ -94,7 +94,7 @@
      (every? (fn [part]
                (and
                 (= 1 (php/preg_match #"^\d+$" part))
-                (<= 0 (php/intval part) 255)))
+                (<= 0 (int part) 255)))
              parts))))
 
 (defn valid-ip? [ip]
@@ -644,7 +644,7 @@
     (number? value) (str value)
     (true? value) "1"
     (false? value) "0"
-    (php/-> pdo (quote (str value)))))
+    (.quote pdo (str value))))
 
 (defn render-query
   "Split before inserting values so a '?' inside a quoted value cannot be
