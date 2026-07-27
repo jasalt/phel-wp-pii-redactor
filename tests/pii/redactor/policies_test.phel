@@ -1,0 +1,112 @@
+(ns tests.pii.redactor.policies-test
+  (:require phel.test :refer [deftest is testing])
+  (:require pii.redactor.core :as core)
+  (:require pii.redactor.policies :as policies))
+
+(def default-options
+  {:redact-names true
+   :redact-urls true
+   :redact-ips true
+   :table nil
+   :verbose false
+   :whitelist-users []})
+
+(defn- policy-by-id [id]
+  (find #(= id (:id %)) policies/table-policies))
+
+(deftest registry-covers-every-table-concern-in-pipeline-order
+  (is (= [:columns :usermeta :logins :comment-authors
+          :postmeta-values :wpml-cache :wxr-imports :stream-logs]
+         (vec (map :id policies/table-policies))))
+  (is (every? #(and (:id %) (:doc %) (:load %) (:plan %))
+              policies/table-policies)))
+
+(deftest interpret-scan-only-runs-declared-pre-passes
+  (let [result (policies/interpret-scan
+                {:options default-options}
+                [{:id :silent}
+                 {:id :scanner
+                  :scan (fn [replacements _ctx]
+                          (assoc replacements :scanned true))}])]
+    (is (true? (:scanned result)))
+    (is (= 0 (core/replacement-count result :emails)))))
+
+(deftest interpret-threads-one-plan-and-collects-messages
+  (let [policy-a {:id :a
+                  :load (fn [_ctx] [1 2])
+                  :plan (fn [plan _options rows]
+                          (reduce
+                           (fn [current n]
+                             (core/add-operation
+                              current "UPDATE a SET x=?" [n] {:table "a" :n n}))
+                           plan
+                           rows))
+                  :report (fn [_options rows fresh]
+                            [["a loaded %d rows, %d changes" (count rows) (count fresh)]])}
+        policy-b {:id :b
+                  :load (fn [_ctx] [])
+                  :plan (fn [plan _options _rows] plan)
+                  :report (fn [_options _rows fresh]
+                            [["b saw %d changes" (count fresh)]])}
+        result   (policies/interpret-policies
+                  {:options default-options
+                   :replacements (core/empty-replacements)}
+                  [policy-a policy-b])]
+    (is (= 2 (count (get-in result [:plan :changes]))))
+    (is (= [["a loaded %d rows, %d changes" 2 2] ["b saw %d changes" 0]]
+           (:messages result)))))
+
+(deftest interpret-tolerates-policies-without-report
+  (let [result (policies/interpret-policies
+                {:options default-options
+                 :replacements (core/empty-replacements)}
+                [{:id :silent
+                  :load (fn [_ctx] nil)
+                  :plan (fn [plan _options _rows] plan)}])]
+    (is (= [] (:messages result)))))
+
+(deftest local-policies-compose-on-real-core-planners
+  (let [tables   (core/classify-columns
+                  [["wp_users" "user_login"]
+                   ["wp_users" "user_pass"]])
+        options  (assoc default-options :verbose true :whitelist-users ["bob"])
+        ctx      {:options options
+                  :replacements (core/empty-replacements)
+                  :discovery {:tables tables
+                              :usermeta-keys ["nickname"]
+                              :postmeta-keys []}
+                  :users [{:id 1 :login "alice" :nicename "" :display-name ""}
+                          {:id 2 :login "bob" :nicename "" :display-name ""}]
+                  :authors ["alice"]}
+        selected (vec (filter
+                       #(contains? #{:columns :usermeta :logins :comment-authors}
+                         (:id %))
+                       policies/table-policies))
+        result   (policies/interpret-policies ctx selected)]
+    (testing "usermeta + per-user logins + password + comment author"
+             (is (= 4 (count (get-in result [:plan :queries])))))
+    (testing "the logins policy reports the whitelisted user"
+             (is (= [["  Skipping whitelisted user: %s" "bob"]]
+                    (:messages result))))))
+
+(deftest wpml-report-matches-empty-and-redacted-cases
+  (let [report (:report (policy-by-id :wpml-cache))]
+    (is (= [["wp_options: no WPML translator cache options found"]]
+           (report {:verbose true} [] [])))
+    (is (= [] (report {:verbose false} [] [])))
+    (is (= [["wp_options: WPML cache PII redacted (%d email replacements)" 2]]
+           (report {:verbose true} [{:name "x" :value "y"}] [{} {}])))))
+
+(deftest wxr-report-matches-empty-and-redacted-cases
+  (let [report (:report (policy-by-id :wxr-imports))]
+    (is (= [["wp_postmeta: no _wxr_import_user_slug entries found"]]
+           (report {:verbose true} [] [])))
+    (is (= [["wp_postmeta: _wxr_import_user_slug redacted (%d entries)" 3]]
+           (report {:verbose true} [{:id 1 :value "v"}] [{} {} {}])))))
+
+(deftest stream-report-is-the-only-non-verbose-message
+  (let [report (:report (policy-by-id :stream-logs))]
+    (is (= [] (report {:verbose false} 0 [])))
+    (is (= [["wp_stream: already empty"]] (report {:verbose true} 0 [])))
+    (is (= [["wp_stream: will truncate %d audit log entries" 7]]
+           (report {:verbose false} 7 [])))))

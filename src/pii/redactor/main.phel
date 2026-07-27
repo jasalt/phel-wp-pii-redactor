@@ -2,7 +2,8 @@
   (:require phel.cli :as cli)
   (:require phel.string :as s)
   (:require pii.redactor.core :as core)
-  (:require pii.redactor.db :as db))
+  (:require pii.redactor.db :as db)
+  (:require pii.redactor.policies :as policies))
 
 ;; ---------------------------------------------------------------------------
 ;; Logging
@@ -49,7 +50,7 @@
     (str (php/getcwd) "/" path)))
 
 ;; ---------------------------------------------------------------------------
-;; Discovery and scan phase
+;; Discovery phase
 ;; ---------------------------------------------------------------------------
 
 (defn- group-label [group]
@@ -75,39 +76,6 @@
              (str (s/join ", " (take 15 usermeta))
                   (if (> (count usermeta) 15) "..." ""))))))
 
-(defn- scan-column [pdo options replacements table column pii-type]
-  (let [values (db/distinct-column-values pdo table column)]
-    (when (and (:verbose options) (not (empty? values)))
-      (info! "  %-40s %-20s %s: %d distinct values"
-             table column (name pii-type) (count values)))
-    (reduce
-     #(core/scan-value %1 pii-type options (s/trim %2))
-     replacements
-     values)))
-
-(defn- scan-table [pdo options replacements table-spec]
-  (reduce
-   (fn [current group]
-     (reduce
-      #(scan-column pdo
-        options
-        %1
-        (:table table-spec)
-        %2
-        (:type group))
-      current
-      (:columns group)))
-   replacements
-   (:groups table-spec)))
-
-(defn scan-replacements [pdo options tables]
-  (reduce
-   #(if (core/selected-table? options (:table %2))
-     (scan-table pdo options %1 %2)
-     %1)
-   (core/empty-replacements)
-   tables))
-
 (defn log-meta-counts! [pdo options discovery]
   (when (:verbose options)
     (doseq [meta-key :in (:usermeta-keys discovery)]
@@ -124,62 +92,14 @@
    (db/load-approved-comment-authors pdo)))
 
 ;; ---------------------------------------------------------------------------
-;; Plan phase
+;; Plan phase: interpreted from policies/table-policies (see policies.phel)
 ;; ---------------------------------------------------------------------------
 
-(defn- plan-postmeta [plan pdo options meta-keys]
-  (reduce
-   #(core/plan-postmeta-values
-     %1
-     options
-     %2
-     (db/distinct-meta-values pdo "wp_postmeta" %2))
-   plan
-   meta-keys))
-
-(defn- option-email-change? [change]
-  (and (= "wp_options" (:table change)) (= :email (:type change))))
-
-(defn- wxr-change? [change]
-  (and (= "wp_postmeta" (:table change))
-       (= "_wxr_import_user_slug" (:meta_key change))))
-
-(defn- plan-residuals [plan pdo options]
-  (let [wpml-rows  (db/wpml-cache-rows pdo)
-        with-wpml  (core/plan-wpml-cache plan wpml-rows)
-        wpml-count (count (core/changes-for with-wpml option-email-change?))]
-    (when (and (:verbose options) (empty? wpml-rows))
-      (info! "wp_options: no WPML translator cache options found"))
-    (when (and (:verbose options) (pos? wpml-count))
-      (info! "wp_options: WPML cache PII redacted (%d email replacements)" wpml-count))
-    (let [wxr-rows  (db/wxr-import-rows pdo)
-          with-wxr  (core/plan-wxr-imports with-wpml wxr-rows)
-          wxr-count (count (core/changes-for with-wxr wxr-change?))]
-      (when (and (:verbose options) (empty? wxr-rows))
-        (info! "wp_postmeta: no _wxr_import_user_slug entries found"))
-      (when (and (:verbose options) (pos? wxr-count))
-        (info! "wp_postmeta: _wxr_import_user_slug redacted (%d entries)" wxr-count))
-      (let [stream-count (db/stream-count pdo)]
-        (if (zero? stream-count)
-          (when (:verbose options)
-            (info! "wp_stream: already empty"))
-          (info! "wp_stream: will truncate %d audit log entries" stream-count))
-        (core/plan-stream-truncate with-wxr stream-count)))))
-
-(defn build-plan [pdo options discovery replacements users authors]
-  (when (:verbose options)
-    (doseq [user :in users :when (core/whitelisted? options (:login user))]
-      (info! "  Skipping whitelisted user: %s" (:login user))))
-  (let [table-plan    (core/plan-table-updates
-                       (core/new-plan replacements) options (:tables discovery))
-        usermeta-plan (core/plan-usermeta-updates
-                       table-plan options (:usermeta-keys discovery))
-        login-plan    (core/plan-login-updates
-                       usermeta-plan options (:tables discovery) users)
-        comment-plan  (core/plan-comment-author-updates login-plan authors)
-        postmeta-plan (plan-postmeta
-                       comment-plan pdo options (:postmeta-keys discovery))]
-    (plan-residuals postmeta-plan pdo options)))
+(defn- build-and-report-plan [ctx]
+  (let [{:keys [plan messages]} (policies/build-plan ctx)]
+    (doseq [message :in messages]
+      (apply info! (first message) (rest message)))
+    plan))
 
 ;; ---------------------------------------------------------------------------
 ;; Execute/preview phase
@@ -239,7 +159,13 @@
               (when-not (empty? authors)
                 (info! "Comment authors to redact (%d): %s"
                        (count authors) (s/join ", " authors))))
-            (let [replacements (scan-replacements pdo options (:tables discovery))]
+            (let [ctx          {:pdo pdo
+                                :options options
+                                :discovery discovery
+                                :users users
+                                :authors authors
+                                :log info!}
+                  replacements (policies/scan-replacements ctx)]
               (log-meta-counts! pdo options discovery)
               (let [public-email-count (db/published-email-count pdo)]
                 (when (pos? public-email-count)
@@ -247,7 +173,8 @@
                               "(skipped — public content)")
                          public-email-count)))
               (info! "Replacement map: %s" (core/replacement-stats replacements))
-              (let [plan (build-plan pdo options discovery replacements users authors)]
+              (let [plan (build-and-report-plan
+                          (assoc ctx :replacements replacements))]
                 (finish-plan! pdo options plan)
                 (when-not (empty? (:whitelist-users options))
                   (info! "Whitelisted users (skipped): %s"

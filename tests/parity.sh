@@ -25,8 +25,8 @@ compare_case() {
     ) 2>&1 | sed -E 's/^[0-9]{2}:[0-9]{2}:[0-9]{2} //' >"$python_output"
 
     (
-        cd "$script_dir/.."
-        scripts/pii-redactor.php --config "$config" "$@"
+        cd "$script_dir"
+        ./pii-redactor.php --config "$config" "$@"
     ) 2>&1 | sed -E 's/^[0-9]{2}:[0-9]{2}:[0-9]{2} //' >"$phel_output"
 
     diff -u "$python_output" "$phel_output"

@@ -1,0 +1,212 @@
+(ns pii.redactor.policies
+  (:require phel.string :as s)
+  (:require pii.redactor.core :as core)
+  (:require pii.redactor.db :as db))
+
+;; ---------------------------------------------------------------------------
+;; Table handling policies as data
+;;
+;; Each policy is a descriptor map:
+;;
+;;   :id      stable keyword naming the table concern
+;;   :doc     human-readable summary of the handling policy
+;;   :scan    (fn [replacements ctx] replacements')  optional registry pre-pass
+;;   :load    (fn [ctx] rows)                        read model (PDO or ctx)
+;;   :plan    (fn [plan options rows] plan')         pure plan transformation
+;;   :report  (fn [options rows fresh-changes] [[message & args] ...])
+;;            optional log messages, returned as data (never printed here)
+;;
+;; The shared ctx is assembled by main:
+;;
+;;   {:pdo :options :discovery :users :authors :replacements :log}
+;;
+;; Vector order is the pipeline order and is load-bearing: every policy
+;; appends to the same immutable plan, and the residual policies
+;; (:wpml-cache, :wxr-imports) rewrite values using replacements that
+;; earlier policies registered.
+;; ---------------------------------------------------------------------------
+
+(defn- scan-column-values [replacements ctx table column pii-type]
+  (let [options (:options ctx)
+        values  (db/distinct-column-values (:pdo ctx) table column)]
+    (when (and (:verbose options) (not (empty? values)))
+      ((:log ctx) "  %-40s %-20s %s: %d distinct values"
+                  table column (name pii-type) (count values)))
+    (reduce
+     #(core/scan-value %1 pii-type options (s/trim %2))
+     replacements
+     values)))
+
+(defn- scan-table-groups [replacements ctx table-spec]
+  (reduce
+   (fn [current group]
+     (reduce
+      #(scan-column-values %1 ctx (:table table-spec) %2 (:type group))
+      current
+      (:columns group)))
+   replacements
+   (:groups table-spec)))
+
+(defn- scan-columns
+  "Registry pre-pass of the :columns policy: fold every distinct value of the
+   discovered PII columns into the replacement registries."
+  [replacements ctx]
+  (reduce
+   (fn [current table-spec]
+     (if (core/selected-table? (:options ctx) (:table table-spec))
+       (scan-table-groups current ctx table-spec)
+       current))
+   replacements
+   (get-in ctx [:discovery :tables])))
+
+(defn- load-postmeta-entries [ctx]
+  (mapv
+   (fn [meta-key]
+     {:meta-key meta-key
+      :values (db/distinct-meta-values (:pdo ctx) "wp_postmeta" meta-key)})
+   (get-in ctx [:discovery :postmeta-keys])))
+
+(defn- plan-postmeta-entries [plan options entries]
+  (reduce
+   (fn [current {:keys [meta-key values]}]
+     (core/plan-postmeta-values current options meta-key values))
+   plan
+   entries))
+
+;; ---------------------------------------------------------------------------
+;; Policy reports: message vectors, rendered by main
+;; ---------------------------------------------------------------------------
+
+(defn- report-whitelisted-users [options {:keys [users]} _fresh-changes]
+  (if (:verbose options)
+    (mapv
+     (fn [user] ["  Skipping whitelisted user: %s" (:login user)])
+     (filter #(core/whitelisted? options (:login %)) users))
+    []))
+
+(defn- report-wpml-cache [options rows fresh-changes]
+  (cond-> []
+          (and (:verbose options) (empty? rows))
+          (conj ["wp_options: no WPML translator cache options found"])
+          (and (:verbose options) (pos? (count fresh-changes)))
+          (conj ["wp_options: WPML cache PII redacted (%d email replacements)"
+                 (count fresh-changes)])))
+
+(defn- report-wxr-imports [options rows fresh-changes]
+  (cond-> []
+          (and (:verbose options) (empty? rows))
+          (conj ["wp_postmeta: no _wxr_import_user_slug entries found"])
+          (and (:verbose options) (pos? (count fresh-changes)))
+          (conj ["wp_postmeta: _wxr_import_user_slug redacted (%d entries)"
+                 (count fresh-changes)])))
+
+(defn- report-stream-logs [options row-count _fresh-changes]
+  (if (zero? row-count)
+    (if (:verbose options) [["wp_stream: already empty"]] [])
+    [["wp_stream: will truncate %d audit log entries" row-count]]))
+
+;; ---------------------------------------------------------------------------
+;; The policy registry: one descriptor per table concern, in pipeline order
+;; ---------------------------------------------------------------------------
+
+(def table-policies
+  [{:id :columns
+    :doc (str "Generic wp_* columns discovered via core/pii-patterns: hashed "
+              "replacements for emails/URLs/IPs, placeholders for "
+              "names/phones/addresses.")
+    :scan scan-columns
+    :load (fn [ctx] (get-in ctx [:discovery :tables]))
+    :plan core/plan-table-updates}
+
+   {:id :usermeta
+    :doc (str "Well-known personal wp_usermeta keys: names become 'Anonymous', "
+              "biographies '[REDACTED]'.")
+    :load (fn [ctx] (get-in ctx [:discovery :usermeta-keys]))
+    :plan core/plan-usermeta-updates}
+
+   {:id :logins
+    :doc (str "Per-user wp_users rewrite: anon-<hash> login/nicename, "
+              "'Anonymous' display name, '*' password. Honors :whitelist-users "
+              "and owns the columns listed in core/deferred-columns.")
+    :load (fn [ctx] {:tables (get-in ctx [:discovery :tables])
+                     :users (:users ctx)})
+    :plan (fn [plan options {:keys [tables users]}]
+            (core/plan-login-updates plan options tables users))
+    :report report-whitelisted-users}
+
+   {:id :comment-authors
+    :doc (str "wp_comments.comment_author values matching a known login or "
+              "display name become 'Anonymous'.")
+    :load (fn [ctx] (:authors ctx))
+    :plan (fn [plan _options authors]
+            (core/plan-comment-author-updates plan authors))}
+
+   {:id :postmeta-values
+    :doc (str "Distinct values of well-known personal wp_postmeta keys: valid "
+              "emails and (with :redact-urls) URLs join the registries and "
+              "are replaced in place.")
+    :load load-postmeta-entries
+    :plan plan-postmeta-entries}
+
+   {:id :wpml-cache
+    :doc (str "wp_options 'wpml-cache-translators-%' rows: registered emails "
+              "and URLs are rewritten inside the cached option values, "
+              "remaining personal emails join the registry.")
+    :load (fn [ctx] (db/wpml-cache-rows (:pdo ctx)))
+    :plan (fn [plan _options rows] (core/plan-wpml-cache plan rows))
+    :report report-wpml-cache}
+
+   {:id :wxr-imports
+    :doc (str "wp_postmeta '_wxr_import_user_slug' values: emails join the "
+              "registry, residual import slugs become '[REDACTED]'.")
+    :load (fn [ctx] (db/wxr-import-rows (:pdo ctx)))
+    :plan (fn [plan _options rows] (core/plan-wxr-imports plan rows))
+    :report report-wxr-imports}
+
+   {:id :stream-logs
+    :doc "wp_stream audit log is truncated when non-empty."
+    :load (fn [ctx] (db/stream-count (:pdo ctx)))
+    :plan (fn [plan _options row-count]
+            (core/plan-stream-truncate plan row-count))
+    :report report-stream-logs}])
+
+;; ---------------------------------------------------------------------------
+;; Policy interpreters: run the descriptors, keep the results as data
+;; ---------------------------------------------------------------------------
+
+(defn interpret-scan
+  "Reduce fresh replacement registries through every policy that declares a
+   :scan pre-pass. Policies without :scan leave the registries untouched."
+  [ctx policies]
+  (reduce
+   (fn [replacements policy]
+     (if-let [scan (:scan policy)]
+       (scan replacements ctx)
+       replacements))
+   (core/empty-replacements)
+   policies))
+
+(defn scan-replacements [ctx]
+  (interpret-scan ctx table-policies))
+
+(defn interpret-policies
+  "Thread one immutable plan through each policy descriptor: load its read
+   model, fold the rows into the plan, and collect its report messages.
+   Returns {:plan ... :messages [...]} — no logging, no PDO writes."
+  [ctx policies]
+  (reduce
+   (fn [{:keys [plan messages]} policy]
+     (let [rows    ((:load policy) ctx)
+           planned ((:plan policy) plan (:options ctx) rows)
+           fresh   (drop (count (:changes plan)) (:changes planned))
+           report  (:report policy)]
+       {:plan planned
+        :messages (if report
+                    (into messages (report (:options ctx) rows fresh))
+                    messages)}))
+   {:plan (core/new-plan (:replacements ctx))
+    :messages []}
+   policies))
+
+(defn build-plan [ctx]
+  (interpret-policies ctx table-policies))

@@ -261,6 +261,12 @@
 (defn add-changes [plan changes]
   (reduce add-change plan changes))
 
+(def deferred-columns
+  "Columns owned by a dedicated table policy rather than the generic column
+   planner: the :logins policy rewrites wp_users.display_name per user
+   (whitelist-aware), so the blanket :name placeholder must skip it."
+  #{["wp_users" "display_name"]})
+
 (defn- plan-registry-column [plan table column pii-type kind]
   (let [table-id  (identifier table)
         column-id (identifier column)
@@ -292,7 +298,7 @@
 
     (and (contains? #{:name :phone :address} pii-type)
          (or (not= pii-type :name) (:redact-names options))
-         (not (and (= table "wp_users") (= column "display_name"))))
+         (not (contains? deferred-columns [table column])))
     (let [placeholder (if (= pii-type :name) "Anonymous" "[REDACTED]")
           column-id   (identifier column)
           sql         (str "UPDATE " (identifier table) " SET " column-id "=?"
@@ -481,32 +487,39 @@
    plan
    values))
 
-(defn- redact-known-emails [acc option-name]
-  (reduce
-   (fn [current [original replacement]]
-     (let [value (get current :value)]
-       (if (s/contains? value original)
-         {:plan (add-change
-                 (get current :plan)
-                 {:table "wp_options"
-                  :column option-name
-                  :type :email
-                  :original original
-                  :new replacement})
-          :value (s/replace value original replacement)}
-         current)))
-   acc
-   (replacement-entries (get-in acc [:plan :replacements]) :emails)))
+(defn- rewrite-occurrences
+  "Replace occurrences of `original` in the threaded {:plan :value}
+   accumulator. `mode` is :all (every occurrence) or :first (first only).
+   When the value contains `original` and `change-fn` is given,
+   (change-fn original replacement) is recorded on the plan; a nil change-fn
+   rewrites silently."
+  [acc mode change-fn original replacement]
+  (let [value (get acc :value)]
+    (if (s/contains? value original)
+      {:plan (if change-fn
+               (add-change (get acc :plan) (change-fn original replacement))
+               (get acc :plan))
+       :value (if (= mode :all)
+                (s/replace value original replacement)
+                (s/replace-first value original replacement))}
+      acc)))
 
-(defn- redact-known-urls [acc]
+(defn- redact-registered
+  "Rewrite the accumulator's :value with every [original replacement] pair of
+   registry `kind`, recording one change per matched entry via `change-fn`."
+  [acc kind mode change-fn]
   (reduce
    (fn [current [original replacement]]
-     (let [value (get current :value)]
-       (if (s/contains? value original)
-         (assoc current :value (s/replace value original replacement))
-         current)))
+     (rewrite-occurrences current mode change-fn original replacement))
    acc
-   (replacement-entries (get-in acc [:plan :replacements]) :urls)))
+   (replacement-entries (get-in acc [:plan :replacements]) kind)))
+
+(defn- wpml-email-change [option-name original replacement]
+  {:table "wp_options"
+   :column option-name
+   :type :email
+   :original original
+   :new replacement})
 
 (defn- redact-new-option-emails [acc option-name]
   (reduce
@@ -540,8 +553,10 @@
        (if (empty? option-value)
          current
          (let [initial      {:plan current :value option-value}
-               known-emails (redact-known-emails initial option-name)
-               known-urls   (redact-known-urls known-emails)
+               known-emails (redact-registered
+                             initial :emails :all
+                             #(wpml-email-change option-name %1 %2))
+               known-urls   (redact-registered known-emails :urls :all nil)
                redacted     (redact-new-option-emails known-urls option-name)]
            (add-query
             (:plan redacted)
@@ -550,23 +565,13 @@
    plan
    rows))
 
-(defn- redact-wxr-known-emails [acc meta-id]
-  (reduce
-   (fn [current [original replacement]]
-     (let [value (get current :value)]
-       (if (s/contains? value original)
-         {:plan (add-change
-                 (get current :plan)
-                 {:table "wp_postmeta"
-                  :meta_key "_wxr_import_user_slug"
-                  :type :email
-                  :original original
-                  :new replacement
-                  :meta_id meta-id})
-          :value (s/replace-first value original replacement)}
-         current)))
-   acc
-   (replacement-entries (get-in acc [:plan :replacements]) :emails)))
+(defn- wxr-email-change [meta-id original replacement]
+  {:table "wp_postmeta"
+   :meta_key "_wxr_import_user_slug"
+   :type :email
+   :original original
+   :new replacement
+   :meta_id meta-id})
 
 (defn- redact-wxr-new-emails [acc original-value meta-id]
   (reduce
@@ -599,7 +604,9 @@
        (if (empty? original-value)
          current
          (let [initial           {:plan current :value original-value}
-               with-known-emails (redact-wxr-known-emails initial meta-id)
+               with-known-emails (redact-registered
+                                  initial :emails :first
+                                  #(wxr-email-change meta-id %1 %2))
                with-new-emails   (redact-wxr-new-emails
                                   with-known-emails original-value meta-id)
                redacted          (if (and

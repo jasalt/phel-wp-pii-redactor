@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "1bba2d0f539dac3b1848ec060f64a227",
+    "content-hash": "11e8f6f5d8ea1f0a4460e7cd67f70019",
     "packages": [
         {
             "name": "amphp/amp",
@@ -244,16 +244,16 @@
         },
         {
             "name": "phel-lang/phel-lang",
-            "version": "dev-main",
+            "version": "dev-nrepl-ns-updates",
             "source": {
                 "type": "git",
                 "url": "https://github.com/phel-lang/phel-lang.git",
-                "reference": "ae1e6d2f28d45ffe894703340ccde7938c8c3e6b"
+                "reference": "c82dbb6d71ce78eeb3c27fc7c717a03b82bab646"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/phel-lang/phel-lang/zipball/ae1e6d2f28d45ffe894703340ccde7938c8c3e6b",
-                "reference": "ae1e6d2f28d45ffe894703340ccde7938c8c3e6b",
+                "url": "https://api.github.com/repos/phel-lang/phel-lang/zipball/c82dbb6d71ce78eeb3c27fc7c717a03b82bab646",
+                "reference": "c82dbb6d71ce78eeb3c27fc7c717a03b82bab646",
                 "shasum": ""
             },
             "require": {
@@ -279,7 +279,6 @@
                 "rector/rector": "^2.3",
                 "vimeo/psalm": "^6.16"
             },
-            "default-branch": true,
             "bin": [
                 "bin/phel"
             ],
@@ -317,7 +316,7 @@
             ],
             "support": {
                 "issues": "https://github.com/phel-lang/phel-lang/issues",
-                "source": "https://github.com/phel-lang/phel-lang/tree/main"
+                "source": "https://github.com/phel-lang/phel-lang/tree/nrepl-ns-updates"
             },
             "funding": [
                 {
@@ -325,7 +324,7 @@
                     "type": "custom"
                 }
             ],
-            "time": "2026-07-27T14:16:54+00:00"
+            "time": "2026-07-27T18:01:58+00:00"
         },
         {
             "name": "psr/container",

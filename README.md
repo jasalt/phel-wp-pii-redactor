@@ -7,12 +7,10 @@ is written in [Phel](https://github.com/phel-lang/phel-lang/) under
 ## Install and run
 
 ```bash
-cd scripts
 composer install
-cd ..
 
-scripts/pii-redactor.php --dry-run --verbose
-scripts/pii-redactor.php --summary
+./pii-redactor.php --dry-run --verbose
+./pii-redactor.php --summary
 ```
 
 Phel 0.49 requires PHP 8.4. The bootstrap automatically re-executes itself with
@@ -25,7 +23,12 @@ Always inspect a dry run before running without `--dry-run`.
 - `core.phel` — pure validation, deterministic replacement registries, and
   immutable query-plan transformations.
 - `db.phel` — WordPress config parsing and the PDO interpreter for query plans.
-- `main.phel` — discovery, scan, planning, CLI, and reporting pipeline.
+- `policies.phel` — table-specific handling policies as data. Each descriptor
+  declares an optional registry pre-pass (`:scan`), a read model (`:load`), a
+  pure plan transformation (`:plan`), and report messages (`:report`); generic
+  interpreters thread one immutable plan through the ordered vector. Adding a
+  new table concern means appending one descriptor to `table-policies`.
+- `main.phel` — discovery, CLI, and reporting pipeline.
 - `entry.phel` — guarded executable entry point.
 
 Updates are represented as data maps (`{:sql ... :params [...]}`) until the
@@ -34,8 +37,7 @@ final PDO boundary. Prepared statements are used for execution.
 ## Development
 
 ```bash
-cd scripts
-composer test:all   # lint + 61 assertions + DB-backed Python/Phel parity
+composer test:all   # lint + 78 assertions + DB-backed Python/Phel parity
 composer build      # compile deployable PHP into ignored out/
 ```
 
