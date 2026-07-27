@@ -6,7 +6,7 @@
         "php": "^8.4",
         "ext-pdo": "*",
         "ext-pdo_mysql": "*",
-        "phel-lang/phel-lang": "^0.49"
+        "phel-lang/phel-lang": "dev-main"
     },
     "scripts": {
         "build": "php8.4 vendor/bin/phel build",

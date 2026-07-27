@@ -646,9 +646,10 @@
     (false? value) "0"
     (php/-> pdo (quote (str value)))))
 
-(defn render-query [pdo query]
-  # Split before inserting values so a '?' inside a quoted value cannot be
-  # mistaken for the next placeholder.
+(defn render-query
+  "Split before inserting values so a '?' inside a quoted value cannot be
+   mistaken for the next placeholder."
+  [pdo query]
   (let [parts (s/split (get query :sql) "/\?/" -1)]
     (loop [rendered        (first parts)
            remaining-parts (next parts)
