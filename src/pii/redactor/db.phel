@@ -17,31 +17,32 @@
 
 (defn parse-wp-config [path]
   (when-not (php/is_file path)
-    (throw (php/new \RuntimeException (str "Config file not found: " path))))
+    (throw (new RuntimeException (str "Config file not found: " path))))
   (let [lines   (vec (php/file path php/FILE_IGNORE_NEW_LINES))
         config
         (reduce
          (fn [current line]
-           (let [matches (php/array)]
+           (let [matches (php/array)] ; TODO no need for php ? -> use immutable vector
              (if (= 1 (php/preg_match config-re line matches))
                (assoc current
                       (get config-keys (php/aget matches 1))
-                      (php/aget matches 2))
+                      (aget matches 2))
                current)))
          {}
          lines)
         missing (find #(not (contains? config %)) [:host :name :user :password])]
     (when missing
       (throw
-       (php/new \RuntimeException
+       (new RuntimeException
                 (str "Missing DB_" (s/upper-case (name missing)) " in " path))))
     config))
 
+;; TODO convert to immutable
 (defn- connection-parts [host]
   (let [matches (php/array)]
-    (if (= 1 (php/preg_match #"^(.+):(\d+)$" host matches))
-      {:host (php/aget matches 1)
-       :port (php/intval (php/aget matches 2))}
+    (if (= 1 (php/preg_match #"^(.+):(\d+)$" host matches))  ; php/preg_match to re-find / re-matches / re-seq
+      {:host (aget matches 1)
+       :port (int (aget matches 2))}
       {:host host})))
 
 (defn connect [config]
@@ -51,15 +52,15 @@
                         (if (contains? parts :port) (str ";port=" (get parts :port)) "")
                         ";charset=utf8mb4")
         attributes
-        #php{(php/:: \PDO ATTR_ERRMODE) (php/:: \PDO ERRMODE_EXCEPTION)
-              (php/:: \PDO ATTR_DEFAULT_FETCH_MODE) (php/:: \PDO FETCH_NUM)
-              (php/:: \PDO ATTR_EMULATE_PREPARES) false}]
-    (php/new \PDO dsn (get config :user) (get config :password) attributes)))
+        #php{(PDO/ATTR_ERRMODE) (PDO/ERRMODE_EXCEPTION)
+             (PDO/ATTR_DEFAULT_FETCH_MODE) (PDO/FETCH_NUM)
+             (PDO/ATTR_EMULATE_PREPARES) false}]
+    (new PDO dsn (get config :user) (get config :password) attributes)))
 
 (defn fetch [pdo sql & [params]]
   (let [statement (.prepare pdo sql)]
     (.execute statement (to-php-array (or params [])))
-    (vec (map vec (.fetchAll statement (php/:: \PDO FETCH_NUM))))))
+    (vec (map vec (.fetchAll statement (PDO/FETCH_NUM))))))
 
 (defn fetch-value [pdo sql & [params]]
   (let [statement (.prepare pdo sql)]
@@ -100,7 +101,7 @@
 (defn load-users [pdo]
   (map
    (fn [[id login nicename display-name]]
-     {:id (php/intval id)
+     {:id (int id)
       :login login
       :nicename nicename
       :display-name display-name})
@@ -134,7 +135,7 @@
              " AND " (core/identifier column) " != ''"))))
 
 (defn meta-count [pdo table meta-key]
-  (php/intval
+  (int
    (fetch-value
     pdo
     (str "SELECT COUNT(*) FROM " (core/identifier table)
@@ -150,7 +151,7 @@
         [meta-key])))
 
 (defn published-email-count [pdo]
-  (php/intval
+  (int
    (fetch-value
     pdo
     "SELECT COUNT(*) FROM wp_posts
@@ -167,14 +168,14 @@
 
 (defn wxr-import-rows [pdo]
   (map
-   (fn [[id value]] {:id (php/intval id) :value value})
+   (fn [[id value]] {:id (int id) :value value})
    (fetch
     pdo
     "SELECT meta_id, meta_value FROM wp_postmeta
        WHERE meta_key='_wxr_import_user_slug' AND meta_value != ''")))
 
 (defn stream-count [pdo]
-  (php/intval (fetch-value pdo "SELECT COUNT(*) FROM wp_stream")))
+  (int (fetch-value pdo "SELECT COUNT(*) FROM wp_stream")))
 
 ;; ---------------------------------------------------------------------------
 ;; Plan interpreter
@@ -182,8 +183,8 @@
 
 (defn- execute-query! [pdo query]
   (let [statement (.prepare pdo (:sql query))]
-    (.execute statement (to-php-array (:params query)))
-    (php/intval (.rowCount statement))))
+    (.execute statement #php (:params query))
+    (int (.rowCount statement))))
 
 (defn execute-queries! [pdo queries]
   (php/-> pdo (exec "SET foreign_key_checks=0"))
