@@ -1,0 +1,13 @@
+(ns pii.redactor.entry
+  (:require phel.cli :as cli)
+  (:require pii.redactor.main :refer [app]))
+
+;; `phel run` supplies only user arguments through *argv*. The CLI application
+;; expects its default command as argv[0], so normalize that here instead of in
+;; a PHP bootstrap.
+(defn run []
+  (cli/run app (cli/argv (vec (cons "redact" *argv*)))))
+
+(when-not *build-mode*
+  ;; Preserve the application's success/error exit status for Phel's runner.
+  (php/exit (run)))

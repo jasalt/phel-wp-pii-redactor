@@ -26,7 +26,7 @@ compare_case() {
 
     (
         cd "$script_dir"
-        ./pii-redactor.php --config "$config" "$@"
+        vendor/bin/phel run src/main.phel --config "$config" "$@"
     ) 2>&1 | sed -E 's/^[0-9]{2}:[0-9]{2}:[0-9]{2} //' >"$phel_output"
 
     diff -u "$python_output" "$phel_output"
