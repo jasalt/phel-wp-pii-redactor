@@ -22,12 +22,11 @@
         config
         (reduce
          (fn [current line]
-           (let [matches #php []] ; TODO use immutable datatype, not mutating in place
-             (if (= 1 (php/preg_match config-re line matches))
-               (assoc current
-                      (get config-keys (aget matches 1))
-                      (aget matches 2))
-               current)))
+           (if-let [matches (re-find config-re line)]
+             (assoc current
+                    (get config-keys (nth matches 1))
+                    (nth matches 2))
+             current))
          {}
          lines)
         missing (find #(not (contains? config %)) [:host :name :user :password])]
@@ -37,13 +36,11 @@
                 (str "Missing DB_" (s/upper-case (name missing)) " in " path))))
     config))
 
-;; TODO convert to immutable
 (defn- connection-parts [host]
-  (let [matches #php []]
-    (if (= 1 (php/preg_match #"^(.+):(\d+)$" host matches))
-      {:host (aget matches 1)
-       :port (int (aget matches 2))}
-      {:host host})))
+  (if-let [matches (re-find #"^(.+):(\d+)$" host)]
+    {:host (nth matches 1)
+     :port (int (nth matches 2))}
+    {:host host}))
 
 (defn connect [config]
   (let [parts      (connection-parts (get config :host))

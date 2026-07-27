@@ -48,7 +48,7 @@
   (sha-prefix url 12))
 
 (defn valid-email? [email]
-  (= 1 (php/preg_match #"^[^@\s]+@[^@\s]+\.[^@\s]+$" email)))
+  (some? (re-find #"^[^@\s]+@[^@\s]+\.[^@\s]+$" email)))
 
 (defn personal-email? [email]
   (let [low             (s/lower-case email)
@@ -85,7 +85,7 @@
   (let [groups (s/split (expand-ipv6 ip) #":" -1)]
     (and
      (= 8 (count groups))
-     (every? #(= 1 (php/preg_match #"^[0-9a-fA-F]{0,4}$" %)) groups))))
+     (every? #(re-find #"^[0-9a-fA-F]{0,4}$" %) groups))))
 
 (defn valid-ipv4? [ip]
   (let [parts (s/split ip #"\." -1)]
@@ -93,7 +93,7 @@
      (= 4 (count parts))
      (every? (fn [part]
                (and
-                (= 1 (php/preg_match #"^\d+$" part))
+                (re-find #"^\d+$" part)
                 (<= 0 (int part) 255)))
              parts))))
 
@@ -203,7 +203,7 @@
 (defn- row-matches [[table column]]
   (let [lower-column (s/lower-case column)]
     (keep (fn [[pii-type pattern]]
-            (when (= 1 (php/preg_match pattern lower-column))
+            (when (re-find pattern lower-column)
               {:table table :type pii-type :column column}))
           pii-patterns)))
 
