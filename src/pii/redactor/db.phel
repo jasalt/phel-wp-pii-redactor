@@ -156,11 +156,13 @@
     ["[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}"])))
 
 (defn wpml-cache-rows [pdo]
+  ;; Cache payloads may be PHP-serialized and can contain sensitive values.
+  ;; Planning deletion needs only the non-sensitive option key.
   (map
-   (fn [[name value]] {:name name :value value})
+   (fn [[name]] {:name name})
    (fetch
     pdo
-    "SELECT option_name, option_value FROM wp_options
+    "SELECT option_name FROM wp_options
        WHERE option_name LIKE 'wpml-cache-translators-%'")))
 
 (defn wxr-import-rows [pdo]
@@ -171,8 +173,17 @@
     "SELECT meta_id, meta_value FROM wp_postmeta
        WHERE meta_key='_wxr_import_user_slug' AND meta_value != ''")))
 
+(defn table-exists? [pdo table]
+  (some?
+   (fetch-value
+    pdo
+    "SELECT 1 FROM information_schema.tables
+       WHERE table_schema=DATABASE() AND table_name=? LIMIT 1"
+    [table])))
+
 (defn stream-count [pdo]
-  (int (fetch-value pdo "SELECT COUNT(*) FROM wp_stream")))
+  (when (table-exists? pdo "wp_stream")
+    (int (fetch-value pdo "SELECT COUNT(*) FROM wp_stream"))))
 
 ;; ---------------------------------------------------------------------------
 ;; Plan interpreter
@@ -184,19 +195,15 @@
     (int (.rowCount statement))))
 
 (defn execute-queries! [pdo queries]
-  (.exec pdo "SET foreign_key_checks=0")
+  ;; Keep foreign-key enforcement enabled. The plan must preserve relational
+  ;; integrity, and every operation in the active planner is now transactional
+  ;; DML rather than implicit-commit DDL.
+  (.beginTransaction pdo)
   (try
-    (.beginTransaction pdo)
-    (try
-      (let [affected (reduce #(+ %1 (execute-query! pdo %2)) 0 queries)]
-        ;; TRUNCATE causes an implicit commit in MySQL. Guarding the explicit
-        ;; commit preserves the legacy behavior while avoiding a PDO exception.
-        (when (.inTransaction pdo)
-          (.commit pdo))
-        affected)
-      (catch Throwable error
-        (when (.inTransaction pdo)
-          (.rollBack pdo))
-        (throw error)))
-    (finally
-      (.exec pdo "SET foreign_key_checks=1"))))
+    (let [affected (reduce #(+ %1 (execute-query! pdo %2)) 0 queries)]
+      (.commit pdo)
+      affected)
+    (catch Throwable error
+      (when (.inTransaction pdo)
+        (.rollBack pdo))
+      (throw error))))

@@ -85,12 +85,14 @@
     []))
 
 (defn- report-wpml-cache [options rows fresh-changes]
-  (cond-> []
-          (and (:verbose options) (empty? rows))
-          (conj ["wp_options: no WPML translator cache options found"])
-          (and (:verbose options) (pos? (count fresh-changes)))
-          (conj ["wp_options: WPML cache PII redacted (%d email replacements)"
-                 (count fresh-changes)])))
+  (if-not (:redact-options options)
+    []
+    (cond-> []
+            (and (:verbose options) (empty? rows))
+            (conj ["wp_options: no WPML translator cache options found"])
+            (and (:verbose options) (pos? (count fresh-changes)))
+            (conj ["wp_options: deleted %d WPML translator cache row(s)"
+                   (count fresh-changes)]))))
 
 (defn- report-wxr-imports [options rows fresh-changes]
   (cond-> []
@@ -101,9 +103,14 @@
                  (count fresh-changes)])))
 
 (defn- report-stream-logs [options row-count _fresh-changes]
-  (if (zero? row-count)
+  (cond
+    (nil? row-count)
+    (if (:verbose options) [["wp_stream: plugin table not installed"]] [])
+
+    (zero? row-count)
     (if (:verbose options) [["wp_stream: already empty"]] [])
-    [["wp_stream: will truncate %d audit log entries" row-count]]))
+
+    [["wp_stream: will delete %d audit log entries" row-count]]))
 
 ;; ---------------------------------------------------------------------------
 ;; The policy registry: one descriptor per table concern, in pipeline order
@@ -149,11 +156,14 @@
     :plan plan-postmeta-entries}
 
    {:id :wpml-cache
-    :doc (str "wp_options 'wpml-cache-translators-%' rows: registered emails "
-              "and URLs are rewritten inside the cached option values, "
-              "remaining personal emails join the registry.")
-    :load (fn [ctx] (db/wpml-cache-rows (:pdo ctx)))
-    :plan (fn [plan _options rows] (core/plan-wpml-cache plan rows))
+    :doc (str "Optionally delete disposable wp_options "
+              "'wpml-cache-translators-%' rows. Their PHP-serialized payloads "
+              "must not be rewritten as raw text.")
+    :load (fn [ctx]
+            (if (get-in ctx [:options :redact-options])
+              (db/wpml-cache-rows (:pdo ctx))
+              []))
+    :plan core/plan-wpml-cache
     :report report-wpml-cache}
 
    {:id :wxr-imports
@@ -164,10 +174,11 @@
     :report report-wxr-imports}
 
    {:id :stream-logs
-    :doc "wp_stream audit log is truncated when non-empty."
+    :doc (str "Optional wp_stream audit rows are deleted transactionally when "
+              "the plugin table exists and is non-empty.")
     :load (fn [ctx] (db/stream-count (:pdo ctx)))
     :plan (fn [plan _options row-count]
-            (core/plan-stream-truncate plan row-count))
+            (core/plan-stream-delete plan row-count))
     :report report-stream-logs}])
 
 ;; ---------------------------------------------------------------------------

@@ -32,17 +32,31 @@
          (remove s/blank?)
          vec)))
 
+(defn execution-mode
+  "Resolve CLI write intent. No flag means :plan; only --apply means :apply."
+  [apply? explicit-preview?]
+  (when (and apply? explicit-preview?)
+    (throw
+     (php/new \InvalidArgumentException
+              "Choose either --apply or --dry-run, not both")))
+  (if apply? :apply :plan))
+
 (defn options-from [ctx]
-  {:config (cli/opt ctx "config")
-   :dry-run (boolean (cli/opt ctx "dry-run"))
-   :verbose (boolean (cli/opt ctx "verbose"))
-   :redact-names (not (boolean (cli/opt ctx "no-names")))
-   :redact-urls (not (boolean (cli/opt ctx "no-urls")))
-   :redact-ips (not (boolean (cli/opt ctx "no-ips")))
-   :redact-options (boolean (cli/opt ctx "redact-options"))
-   :table (cli/opt ctx "table")
-   :summary (boolean (cli/opt ctx "summary"))
-   :whitelist-users (whitelist (cli/opt ctx "whitelist-users"))})
+  (let [mode (execution-mode
+              (boolean (cli/opt ctx "apply"))
+              (boolean (cli/opt ctx "dry-run")))]
+    {:config (cli/opt ctx "config")
+     ;; Planning is the safe default. Only --apply crosses the write boundary.
+     :dry-run (= :plan mode)
+     :show-values (boolean (cli/opt ctx "show-values"))
+     :verbose (boolean (cli/opt ctx "verbose"))
+     :redact-names (not (boolean (cli/opt ctx "no-names")))
+     :redact-urls (not (boolean (cli/opt ctx "no-urls")))
+     :redact-ips (not (boolean (cli/opt ctx "no-ips")))
+     :redact-options (boolean (cli/opt ctx "redact-options"))
+     :table (cli/opt ctx "table")
+     :summary (boolean (cli/opt ctx "summary"))
+     :whitelist-users (whitelist (cli/opt ctx "whitelist-users"))}))
 
 (defn- absolute-path [path]
   (if (s/starts-with? path "/")
@@ -111,19 +125,29 @@
     (doseq [table :in (sort (keys by-table))]
       (info! "  %-40s %d change(s)" table (get by-table table)))))
 
+(defn query-preview
+  "Render a planned statement without exposing parameter values by default."
+  [pdo options query]
+  (if (:show-values options)
+    (core/render-query pdo query)
+    (format "%s  [parameters hidden: %d]"
+            (:sql query)
+            (count (:params query)))))
+
 (defn finish-plan! [pdo options plan]
   (let [queries (:queries plan)]
     (if (:dry-run options)
       (do
-        (info! "Would execute %d UPDATE queries" (count queries))
+        (info! "Would execute %d SQL statement(s)" (count queries))
         (doseq [query :in (take 25 queries)]
-          (info! "  %s" (core/render-query pdo query)))
+          (info! "  %s" (query-preview pdo options query)))
         (when (> (count queries) 25)
           (info! "  ... and %d more" (- (count queries) 25))))
       (if (empty? queries)
         (info! "Nothing to do.")
         (do
-          (info! "Executing %d UPDATE queries inside a transaction..." (count queries))
+          (info! "Executing %d SQL statement(s) inside a transaction..."
+                 (count queries))
           (let [affected (db/execute-queries! pdo queries)]
             (info! "Transaction complete. Total affected rows: %d" affected))
           (log-summary! plan))))))
@@ -143,7 +167,7 @@
     (info! "DB credentials: host=%s  name=%s  user=%s"
            (:host config) (:name config) (:user config))
     (when (:dry-run options)
-      (info! "=== DRY RUN MODE (no changes will be written) ==="))
+      (info! "=== PLAN MODE (no changes will be written) ==="))
     (let [pdo       (db/connect config)
           discovery {:tables (db/discover-pii-tables pdo (:name config))
                      :usermeta-keys (db/discover-usermeta-keys pdo)
@@ -157,8 +181,11 @@
             (when (:verbose options)
               (info! "Loaded %d user_logins for whitelist check" (count users))
               (when-not (empty? authors)
-                (info! "Comment authors to redact (%d): %s"
-                       (count authors) (s/join ", " authors))))
+                (if (:show-values options)
+                  (info! "Comment authors to redact (%d): %s"
+                         (count authors) (s/join ", " authors))
+                  (info! "Comment authors to redact: %d value(s) hidden"
+                         (count authors)))))
             (let [ctx          {:pdo pdo
                                 :options options
                                 :discovery discovery
@@ -177,8 +204,11 @@
                           (assoc ctx :replacements replacements))]
                 (finish-plan! pdo options plan)
                 (when-not (empty? (:whitelist-users options))
-                  (info! "Whitelisted users (skipped): %s"
-                         (s/join ", " (sort (:whitelist-users options)))))
+                  (if (:show-values options)
+                    (info! "Whitelisted users (skipped): %s"
+                           (s/join ", " (sort (:whitelist-users options))))
+                    (info! "Whitelisted users skipped: %d value(s) hidden"
+                           (count (:whitelist-users options)))))
                 (info! "Redaction complete. Changes: %d" (count (:changes plan)))
                 0))))))))
 
@@ -197,15 +227,21 @@
     :commands
     [{:name "redact"
       :doc "Anonymize non-public PII in a WordPress database"
-      :help (str "Discovers PII columns and creates a deterministic, transactional "
-                 "redaction plan. Use --dry-run before every live run.")
+      :help (str "Discovers PII columns and creates a deterministic redaction "
+                 "plan. Planning is the default; pass --apply explicitly to write.")
       :opts [{:name "config"
               :mode :required
               :default "wp-config.php"
               :doc "Path to wp-config.php"}
+             {:name "apply"
+              :mode :none
+              :doc "Execute the plan; without this option nothing is written"}
              {:name "dry-run"
               :mode :none
-              :doc "Show changes without writing"}
+              :doc "Explicitly select the default no-write plan mode"}
+             {:name "show-values"
+              :mode :none
+              :doc "Unsafe: include raw SQL parameter values in plan output"}
              {:name "no-names"
               :mode :none
               :doc "Skip name fields"}
@@ -217,7 +253,7 @@
               :doc "Skip IP addresses"}
              {:name "redact-options"
               :mode :none
-              :doc "Also redact supported wp_options cache data"}
+              :doc "Delete supported disposable wp_options cache rows"}
              {:name "table"
               :mode :required
               :doc "Restrict generic discovery to one table"}

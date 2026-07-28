@@ -89,13 +89,17 @@
              (is (= [["  Skipping whitelisted user: %s" "bob"]]
                     (:messages result))))))
 
-(deftest wpml-report-matches-empty-and-redacted-cases
+(deftest wpml-report-is-option-aware-and-describes-deletion
   (let [report (:report (policy-by-id :wpml-cache))]
+    (is (= [] (report {:verbose true :redact-options false} [] [])))
     (is (= [["wp_options: no WPML translator cache options found"]]
-           (report {:verbose true} [] [])))
-    (is (= [] (report {:verbose false} [] [])))
-    (is (= [["wp_options: WPML cache PII redacted (%d email replacements)" 2]]
-           (report {:verbose true} [{:name "x" :value "y"}] [{} {}])))))
+           (report {:verbose true :redact-options true} [] [])))
+    (is (= [] (report {:verbose false :redact-options true} [] [])))
+    (is (= [["wp_options: deleted %d WPML translator cache row(s)" 2]]
+           (report
+            {:verbose true :redact-options true}
+            [{:name "x"} {:name "y"}]
+            [{} {}])))))
 
 (deftest wxr-report-matches-empty-and-redacted-cases
   (let [report (:report (policy-by-id :wxr-imports))]
@@ -104,9 +108,12 @@
     (is (= [["wp_postmeta: _wxr_import_user_slug redacted (%d entries)" 3]]
            (report {:verbose true} [{:id 1 :value "v"}] [{} {} {}])))))
 
-(deftest stream-report-is-the-only-non-verbose-message
+(deftest stream-report-handles-an-optional-table
   (let [report (:report (policy-by-id :stream-logs))]
+    (is (= [] (report {:verbose false} nil [])))
+    (is (= [["wp_stream: plugin table not installed"]]
+           (report {:verbose true} nil [])))
     (is (= [] (report {:verbose false} 0 [])))
     (is (= [["wp_stream: already empty"]] (report {:verbose true} 0 [])))
-    (is (= [["wp_stream: will truncate %d audit log entries" 7]]
+    (is (= [["wp_stream: will delete %d audit log entries" 7]]
            (report {:verbose false} 7 [])))))

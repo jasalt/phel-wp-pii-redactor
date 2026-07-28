@@ -50,11 +50,19 @@
 (defn valid-email? [email]
   (some? (re-find #"^[^@\s]+@[^@\s]+\.[^@\s]+$" email)))
 
+(defn generated-email? [email]
+  (some?
+   (re-find
+    #"^anon-[0-9a-f]{12}@localhost\.localdomain$"
+    (s/lower-case (s/trim email)))))
+
 (defn personal-email? [email]
   (let [low             (s/lower-case email)
         system-prefixes ["noreply@" "no-reply@" "donotreply@" "wordpress@" "wp@"
                          "mailer@" "system@" "bot@" "robot@" "do-not-reply@"]]
-    (not (some #(s/starts-with? low %) system-prefixes))))
+    (and
+     (not (generated-email? low))
+     (not (some #(s/starts-with? low %) system-prefixes)))))
 
 (defn valid-url? [url]
   (let [parts (php->phel (php/parse_url url))]
@@ -62,6 +70,12 @@
      (not (false? parts))
      (contains? #{"http" "https"} (get parts "scheme"))
      (not (empty? (or (get parts "host") ""))))))
+
+(defn generated-url? [url]
+  (some?
+   (re-find
+    #"^https://redacted\.example\.invalid/path/[0-9a-f]{12}$"
+    (s/trim url))))
 
 (defn expand-ipv6 [ip]
   (let [halves      (s/split ip #"::" -1)
@@ -172,7 +186,7 @@
      :urls
      normalized
      normalized
-     (valid-url? normalized)
+     (and (valid-url? normalized) (not (generated-url? normalized)))
      #(str "https://redacted.example.invalid/path/" (url-hash %)))))
 
 (defn register-ip [replacements ip]
@@ -375,6 +389,9 @@
 (defn- present-or [value fallback]
   (if (empty? (or value "")) fallback value))
 
+(defn generated-login? [login]
+  (some? (re-find #"^anon-[0-9a-f]{8}$" (s/lower-case login))))
+
 (defn plan-login-updates [plan options tables users]
   (let [login-columns    (columns-for tables "wp_users" :login)
         login-column-set (set login-columns)]
@@ -387,9 +404,13 @@
                  (if (whitelisted? options login)
                    current
                    (let [id            (get user :id)
-                         new-login     (str "anon-" (sha-prefix login 8))
+                         new-login     (if (generated-login? login)
+                                         login
+                                         (str "anon-" (sha-prefix login 8)))
                          with-login
-                         (if (contains? login-column-set "user_login")
+                         (if (and
+                              (contains? login-column-set "user_login")
+                              (not (= login new-login)))
                            (add-operation
                             current
                             "UPDATE wp_users SET user_login=? WHERE ID=?"
@@ -401,7 +422,9 @@
                              :new new-login})
                            current)
                          with-nicename
-                         (if (contains? login-column-set "user_nicename")
+                         (if (and
+                              (contains? login-column-set "user_nicename")
+                              (not (= (get user :nicename) new-login)))
                            (add-operation
                             with-login
                             "UPDATE wp_users SET user_nicename=? WHERE ID=?"
@@ -412,7 +435,9 @@
                              :original (present-or (get user :nicename) login)
                              :new new-login})
                            with-login)]
-                     (if (contains? login-column-set "display_name")
+                     (if (and
+                          (contains? login-column-set "display_name")
+                          (not (= "Anonymous" (get user :display-name))))
                        (add-operation
                         with-nicename
                         "UPDATE wp_users SET display_name=? WHERE ID=?"
@@ -432,7 +457,7 @@
              (not (empty? ids)))
           (add-operation
            planned
-           (str "UPDATE wp_users SET user_pass='*' WHERE ID IN ("
+           (str "UPDATE wp_users SET user_pass='*' WHERE user_pass != '*' AND ID IN ("
                 (s/join "," (repeat (count ids) "?")) ")")
            ids
            {:table "wp_users"
@@ -514,56 +539,26 @@
    acc
    (replacement-entries (get-in acc [:plan :replacements]) kind)))
 
-(defn- wpml-email-change [option-name original replacement]
-  {:table "wp_options"
-   :column option-name
-   :type :email
-   :original original
-   :new replacement})
-
-(defn- redact-new-option-emails [acc option-name]
-  (reduce
-   (fn [current email]
-     (let [normalized (s/lower-case email)
-           plan       (get current :plan)]
-       (if (and
-            (valid-email? email)
-            (personal-email? email)
-            (not (registry-contains? (get plan :replacements) :emails normalized)))
-         (let [[next-plan replacement] (register-plan-value plan register-email email)]
-           (if (= replacement email)
-             current
-             {:plan (add-change
-                     next-plan
-                     {:table "wp_options"
-                      :column option-name
-                      :type :email
-                      :original email
-                      :new replacement})
-              :value (s/replace-first (get current :value) email replacement)}))
-         current)))
-   acc
-   (distinct (re-seq email-re (get acc :value)))))
-
-(defn plan-wpml-cache [plan rows]
-  (reduce
-   (fn [current row]
-     (let [option-name  (get row :name)
-           option-value (get row :value)]
-       (if (empty? option-value)
-         current
-         (let [initial      {:plan current :value option-value}
-               known-emails (redact-registered
-                             initial :emails :all
-                             #(wpml-email-change option-name %1 %2))
-               known-urls   (redact-registered known-emails :urls :all nil)
-               redacted     (redact-new-option-emails known-urls option-name)]
-           (add-query
-            (:plan redacted)
-            "UPDATE wp_options SET option_value=? WHERE option_name=?"
-            [(:value redacted) option-name])))))
-   plan
-   rows))
+(defn plan-wpml-cache
+  "Delete disposable WPML translator cache rows when option redaction is
+   explicitly enabled. Editing their serialized PHP payload as text can corrupt
+   embedded string-length markers."
+  [plan options rows]
+  (if-not (:redact-options options)
+    plan
+    (reduce
+     (fn [current row]
+       (let [option-name (:name row)]
+         (add-operation
+          current
+          "DELETE FROM wp_options WHERE option_name=?"
+          [option-name]
+          {:table "wp_options"
+           :column option-name
+           :type :delete-cache
+           :count 1})))
+     plan
+     rows)))
 
 (defn- wxr-email-change [meta-id original replacement]
   {:table "wp_postmeta"
@@ -629,16 +624,19 @@
    plan
    rows))
 
-(defn plan-stream-truncate [plan row-count]
-  (if (zero? row-count)
+(defn plan-stream-delete
+  "Delete optional Stream audit rows without issuing transaction-breaking DDL.
+   A nil row count means the plugin table is not installed."
+  [plan row-count]
+  (if (or (nil? row-count) (zero? row-count))
     plan
     (add-operation
      plan
-     "TRUNCATE TABLE wp_stream"
+     "DELETE FROM wp_stream"
      []
      {:table "wp_stream"
       :column "all"
-      :type :truncate
+      :type :delete
       :count row-count})))
 
 ;; ---------------------------------------------------------------------------

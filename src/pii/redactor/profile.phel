@@ -1,0 +1,248 @@
+(ns pii.redactor.profile
+  (:require phel.string :as s)
+  (:require pii.redactor.transforms :as transforms))
+
+;; Profiles stay as ordinary maps and vectors. These helpers validate and query
+;; them without connecting to a database, which keeps profile development fast
+;; at the REPL.
+
+(def source-kinds
+  #{:rows :metadata :delete :schema-audit})
+
+(defn diagnostic [path message]
+  {:path path :message message})
+
+(defn- check [diagnostics valid? path message]
+  (if valid?
+    diagnostics
+    (conj diagnostics (diagnostic path message))))
+
+(defn valid-strategy? [strategy]
+  (or
+   (contains? #{:token :clear} strategy)
+   (and
+    (vector? strategy)
+    (= 2 (count strategy))
+    (= :constant (first strategy)))
+   (and
+    (map? strategy)
+    (contains? #{:token :clear :constant} (:op strategy))
+    (or
+     (not (= :constant (:op strategy)))
+     (contains? strategy :value)))))
+
+(defn field-diagnostics [path spec]
+  (-> []
+      (check
+       (map? spec)
+       path
+       "Field specification must be a map")
+      (check
+       (and (map? spec)
+            (contains? transforms/supported-kinds (:kind spec)))
+       (conj path :kind)
+       "Field must declare a supported :kind")
+      (check
+       (and (map? spec) (valid-strategy? (:strategy spec)))
+       (conj path :strategy)
+       "Field must declare :token, :clear, or a constant strategy")))
+
+(defn- fields-diagnostics [path fields]
+  (if-not (map? fields)
+    [(diagnostic path "Row rule :fields must be a map")]
+    (reduce-kv
+     (fn [result field spec]
+       (into result (field-diagnostics (conj path field) spec)))
+     []
+     fields)))
+
+(defn- metadata-case-diagnostics [path case-spec]
+  (let [with-shape
+        (-> []
+            (check (map? case-spec) path "Metadata case must be a map")
+            (check
+             (and (map? case-spec)
+                  (vector? (:keys case-spec))
+                  (not (empty? (:keys case-spec))))
+             (conj path :keys)
+             "Metadata case must declare a non-empty :keys vector"))]
+    (if (map? case-spec)
+      (into
+       with-shape
+       (field-diagnostics
+        path
+        {:kind (:kind case-spec)
+         :strategy (:strategy case-spec)}))
+      with-shape)))
+
+(defn rule-diagnostics
+  "Return path-oriented diagnostics for one profile rule."
+  [index rule]
+  (let [path   [:rules index]
+        source (:source rule)
+        kind   (:kind source)
+        common
+        (-> []
+            (check (map? rule) path "Rule must be a map")
+            (check
+             (and (map? rule) (keyword? (:id rule)))
+             (conj path :id)
+             "Rule must have a keyword :id")
+            (check
+             (and (map? source) (contains? source-kinds kind))
+             (conj path :source :kind)
+             "Rule source must have a supported :kind")
+            (check
+             (and (map? source)
+                  (or (keyword? (:table source))
+                      (string? (:table source))))
+             (conj path :source :table)
+             "Rule source must name a logical table"))]
+    (case kind
+      :rows
+      (into
+       (check
+        common
+        (and (vector? (:pk source)) (not (empty? (:pk source))))
+        (conj path :source :pk)
+        "Row source must declare a non-empty :pk vector")
+       (fields-diagnostics (conj path :fields) (:fields rule)))
+
+      :metadata
+      (let [with-source
+            (-> common
+                (check
+                 (and (vector? (:pk source)) (not (empty? (:pk source))))
+                 (conj path :source :pk)
+                 "Metadata source must declare a non-empty :pk vector")
+                (check
+                 (keyword? (:key source))
+                 (conj path :source :key)
+                 "Metadata source must declare a keyword :key column")
+                (check
+                 (keyword? (:value source))
+                 (conj path :source :value)
+                 "Metadata source must declare a keyword :value column")
+                (check
+                 (vector? (:cases rule))
+                 (conj path :cases)
+                 "Metadata rule :cases must be a vector"))]
+        (if (vector? (:cases rule))
+          (reduce
+           (fn [result [case-index case-spec]]
+             (into
+              result
+              (metadata-case-diagnostics
+               (conj path :cases case-index)
+               case-spec)))
+           with-source
+           (map-indexed vector (:cases rule)))
+          with-source))
+
+      :delete
+      (check
+       common
+       (contains? rule :where)
+       (conj path :where)
+       "Delete rule must declare :where")
+
+      :schema-audit
+      (check
+       common
+       (contains? rule :match)
+       (conj path :match)
+       "Schema audit rule must declare :match")
+
+      common)))
+
+(defn diagnostics
+  "Validate a plain profile map without database access.
+
+   Returns an empty vector for a valid profile; it never throws for malformed
+   profile data, making it convenient for iterative REPL development."
+  [profile]
+  (let [rules         (:rules profile)
+        initial       (-> []
+                       (check
+                        (map? profile)
+                        []
+                        "Profile must be a map")
+                       (check
+                        (and (map? profile) (keyword? (:name profile)))
+                        [:name]
+                        "Profile must have a keyword :name")
+                       (check
+                        (and (map? profile) (vector? rules))
+                        [:rules]
+                        "Profile :rules must be a vector"))
+        with-rules    (if (vector? rules)
+                     (reduce
+                      (fn [result [index rule]]
+                        (into result (rule-diagnostics index rule)))
+                      initial
+                      (map-indexed vector rules))
+                     initial)
+        duplicate-ids
+        (if (vector? rules)
+          (->> rules
+               (keep :id)
+               frequencies
+               seq
+               (filter (fn [entry] (> (second entry) 1)))
+               (map first))
+          [])]
+    (reduce
+     (fn [result id]
+       (conj
+        result
+        (diagnostic [:rules :duplicate-id id]
+                    (str "Duplicate rule id: " id))))
+     with-rules
+     duplicate-ids)))
+
+(defn valid-profile? [profile]
+  (empty? (diagnostics profile)))
+
+(defn assert-valid
+  "Return `profile`, or throw an InvalidArgumentException with all diagnostics."
+  [profile]
+  (let [problems (diagnostics profile)]
+    (when-not (empty? problems)
+      (throw
+       (php/new
+        \InvalidArgumentException
+        (s/join
+         "; "
+         (map #(str (:path %) " " (:message %)) problems)))))
+    profile))
+
+(defn rule-by-id [profile id]
+  (find #(= id (:id %)) (:rules profile)))
+
+(defn enabled-rules
+  "Select rules using optional `:rules`, `:exclude-rules`, `:categories`, and
+   `:tables` collections. Empty or absent include collections mean all."
+  [profile options]
+  (let [included-rules (set (:rules options []))
+        excluded-rules (set (:exclude-rules options []))
+        categories     (set (:categories options []))
+        tables         (set (:tables options []))]
+    (filterv
+     (fn [rule]
+       (and
+        (or (empty? included-rules)
+            (contains? included-rules (:id rule)))
+        (not (contains? excluded-rules (:id rule)))
+        (or (empty? categories)
+            (contains? categories (:category rule)))
+        (or (empty? tables)
+            (contains? tables (get-in rule [:source :table])))))
+     (:rules profile))))
+
+(defn summary
+  "Return a compact, printable view of a profile for REPL inspection."
+  [profile]
+  {:name (:name profile)
+   :rule-count (count (:rules profile))
+   :rule-ids (mapv :id (:rules profile))
+   :tables (vec (distinct (map #(get-in % [:source :table]) (:rules profile))))})

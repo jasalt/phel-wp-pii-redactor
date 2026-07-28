@@ -1,0 +1,90 @@
+(ns tests.pii.redactor.transforms-test
+  (:require phel.test :refer [deftest is testing])
+  (:require phel.string :as s)
+  (:require pii.redactor.transforms :as transforms))
+
+(def secret "test-only-secret")
+
+(deftest canonical-values-are-repl-inspectable
+  (is (= "alice@example.org"
+         (transforms/canonicalize :email " Alice@Example.ORG ")))
+  (is (= "2001:db8::1"
+         (transforms/canonicalize :ip "2001:0DB8::1")))
+  (is (transforms/valid-value? :url "https://example.org/path"))
+  (is (not (transforms/valid-value? :email "not-an-email"))))
+
+(deftest hmac-tokens-are-deterministic-and-namespaced
+  (let [email-token (transforms/hmac-token secret :email "same" 16)]
+    (is (= email-token
+           (transforms/hmac-token secret :email "same" 16)))
+    (is (not (= email-token
+                (transforms/hmac-token secret :login "same" 16))))
+    (is (= 16 (count email-token))))
+  (is (thrown? InvalidArgumentException
+               (transforms/hmac-token "" :email "value" 12))))
+
+(deftest email-tokenization-is-canonical-and-idempotent
+  (let [upper  (transforms/redact secret :email :token "Alice@Example.ORG")
+        lower  (transforms/redact secret :email :token "alice@example.org")
+        second (transforms/redact secret :email :token (:after upper))]
+    (is (transforms/changed? upper))
+    (is (= (:after upper) (:after lower)))
+    (is (transforms/valid-email? (:after upper)))
+    (is (transforms/redacted-value? :email (:after upper)))
+    (is (= :unchanged (:status second)))
+    (is (= :already-redacted (:reason second)))
+    (is (= (:after upper) (:after second)))))
+
+(deftest entity-seeds-correlate-login-output
+  (let [context {:namespace :wordpress-user :seed 42}
+        first   (transforms/redact secret :login :token "alice" context)
+        renamed (transforms/redact secret :login :token "renamed" context)]
+    (is (= (:after first) (:after renamed)))
+    (is (transforms/redacted-value? :login (:after first)))))
+
+(deftest url-tokenization-is-valid-and-idempotent
+  (let [first  (transforms/redact secret :url :token "https://example.org/a?q=1")
+        second (transforms/redact secret :url :token (:after first))]
+    (is (transforms/valid-url? (:after first)))
+    (is (= :already-redacted (:reason second)))
+    (is (= (:after first) (:after second)))))
+
+(deftest ip-tokenization-preserves-address-family
+  (testing "IPv4"
+           (let [result (transforms/redact secret :ip :token "203.0.113.42")]
+             (is (transforms/valid-ip? (:after result)))
+             (is (transforms/redacted-value? :ip (:after result)))
+             (is (not (s/contains? (:after result) ":")))))
+  (testing "IPv6"
+           (let [result (transforms/redact secret :ip :token
+                                           "2001:4860:4860::8888")]
+             (is (transforms/valid-ip? (:after result)))
+             (is (transforms/redacted-value? :ip (:after result)))
+             (is (s/contains? (:after result) ":")))))
+
+(deftest explicit-non-token-strategies-remain-simple
+  (is (= "Anonymous"
+         (:after
+          (transforms/redact
+           secret :name [:constant "Anonymous"] "Alice"))))
+  (is (= ""
+         (:after
+          (transforms/redact secret :address :clear "Example Street 1"))))
+  (is (= :same-value
+         (:reason
+          (transforms/redact
+           secret :name [:constant "Anonymous"] "Anonymous")))))
+
+(deftest invalid-and-empty-values-are-skipped
+  (is (= {:status :skipped
+          :reason :invalid
+          :kind :email
+          :before "invalid"
+          :after "invalid"}
+         (transforms/redact secret :email :token "invalid")))
+  (is (= :empty
+         (:reason (transforms/redact secret :email :token "  ")))))
+
+(deftest token-strategy-rejects-unsupported-kinds
+  (is (thrown? InvalidArgumentException
+               (transforms/redact secret :name :token "Alice"))))

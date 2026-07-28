@@ -9,46 +9,56 @@ needed. The implementation lives under `src/pii/redactor/`.
 ```bash
 composer install
 
-# Use the path to the target WordPress installation's wp-config.php.
-vendor/bin/phel run src/main.phel --config /path/to/wp-config.php --dry-run --verbose
+# Planning is the default; this does not write to the database.
+vendor/bin/phel run src/main.phel --config /path/to/wp-config.php --verbose
 vendor/bin/phel run src/main.phel --config /path/to/wp-config.php --summary
+
+# Apply only after reviewing the plan.
+vendor/bin/phel run src/main.phel --config /path/to/wp-config.php --apply
 ```
 
 If `phel` is on your `PATH`, `phel run src/main.phel ...` is equivalent. Phel
 0.49 requires PHP 8.4; use `php8.4 vendor/bin/phel` when the default `php` is
 older.
 
-Always inspect a dry run before running without `--dry-run`.
+The command does not write unless `--apply` is present. Plan parameters are
+hidden because they can contain raw PII; `--show-values` is an explicit unsafe
+diagnostic option.
 
 ## Design
 
-- `core.phel` — pure validation, deterministic replacement registries, and
-  immutable query-plan transformations.
-- `db.phel` — WordPress config parsing and the PDO interpreter for query plans.
-- `policies.phel` — table-specific handling policies as data. Each descriptor
-  declares an optional registry pre-pass (`:scan`), a read model (`:load`), a
-  pure plan transformation (`:plan`), and report messages (`:report`); generic
-  interpreters thread one immutable plan through the ordered vector. Adding a
-  new table concern means appending one descriptor to `table-policies`.
-- `src/pii/redactor/main.phel` — discovery, CLI, and reporting pipeline.
-- `src/main.phel` — native Phel executable entry point.
+The replacement architecture and migration milestones are documented in
+[`PLAN.md`](PLAN.md). [`REPL-GUIDE.md`](REPL-GUIDE.md) contains the validated
+interactive workflow.
 
-Updates are represented as data maps (`{:sql ... :params [...]}`) until the
-final PDO boundary. Prepared statements are used for execution.
+V2 starts with two side-effect-free, REPL-friendly namespaces:
+
+- `transforms.phel` — canonicalization and keyed, idempotent value strategies.
+- `profile.phel` — validation and selection for profiles represented as plain
+  maps and vectors.
+
+The active CLI still uses the legacy `core.phel`, `db.phel`, and
+`policies.phel` pipeline during migration. Its immediate write boundary has
+been hardened: writes require `--apply`, WPML cache payloads are deleted rather
+than rewritten, Stream cleanup uses transactional `DELETE`, foreign-key checks
+remain enabled, and preview parameters are hidden.
+
+Prepared statements are used for execution.
 
 ## Development
 
 ```bash
-composer test:all   # lint + 78 assertions + DB-backed Python/Phel parity
+composer test:all   # lint + unit tests
 composer build      # optional: compile a deployable PHP artifact into ignored out/
 ```
 
-For interactive development with
-[brepl](https://github.com/licht1stein/brepl/):
+For the complete interactive workflow, see [`REPL-GUIDE.md`](REPL-GUIDE.md).
+A minimal [brepl](https://github.com/licht1stein/brepl/) session is:
 
 ```bash
 php8.4 vendor/bin/phel nrepl --port=7888
 brepl -p 7888 <<'EOF'
-(require 'pii.redactor.core)
+(require 'pii.redactor.transforms)
+(require 'pii.redactor.profile)
 EOF
 ```

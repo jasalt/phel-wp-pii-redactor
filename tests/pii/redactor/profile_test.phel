@@ -1,0 +1,94 @@
+(ns tests.pii.redactor.profile-test
+  (:require phel.test :refer [deftest is testing])
+  (:require pii.redactor.profile :as profile))
+
+(def valid-profile
+  {:name :wordpress
+   :rules
+   [{:id :users/profile
+     :category :identity
+     :source {:kind :rows :table :users :pk [:ID]}
+     :fields
+     {:user_email {:kind :email :strategy :token}
+      :display_name {:kind :name :strategy [:constant "Anonymous"]}}}
+
+    {:id :postmeta/customer
+     :category :commerce
+     :source {:kind :metadata
+              :table :postmeta
+              :pk [:meta_id]
+              :key :meta_key
+              :value :meta_value}
+     :cases
+     [{:keys ["_billing_email"] :kind :email :strategy :token}
+      {:keys ["_billing_first_name" "_billing_last_name"]
+       :kind :name
+       :strategy :clear}]}
+
+    {:id :stream/logs
+     :category :logs
+     :source {:kind :delete :table :stream}
+     :where :all}]})
+
+(deftest plain-profile-data-validates
+  (is (= [] (profile/diagnostics valid-profile)))
+  (is (profile/valid-profile? valid-profile))
+  (is (= valid-profile (profile/assert-valid valid-profile))))
+
+(deftest diagnostics-identify-the-invalid-field-path
+  (is (= [{:path [:rules 0 :fields :user_email :kind]
+           :message "Field must declare a supported :kind"}]
+         (profile/diagnostics
+          (assoc-in
+           valid-profile
+           [:rules 0 :fields :user_email :kind]
+           :unknown)))))
+
+(deftest diagnostics-accumulate-structural-errors
+  (let [problems (profile/diagnostics
+                  {:name :broken
+                   :rules [{:id :duplicate}
+                           {:id :duplicate}]})]
+    (is (= 5 (count problems)))
+    (is (= [:rules :duplicate-id :duplicate]
+           (:path (peek problems))))
+    (is (thrown? InvalidArgumentException
+                 (profile/assert-valid
+                  {:name :broken :rules [{:id :duplicate}]})))))
+
+(deftest metadata-cases-require-keys-kind-and-strategy
+  (let [broken (assoc-in valid-profile [:rules 1 :cases 0 :keys] [])
+        paths  (mapv :path (profile/diagnostics broken))]
+    (is (= [[:rules 1 :cases 0 :keys]] paths))))
+
+(deftest effective-rules-use-uniform-selectors
+  (testing "category include"
+           (is (= [:stream/logs]
+                  (mapv
+                   :id
+                   (profile/enabled-rules
+                    valid-profile
+                    {:categories [:logs]})))))
+  (testing "table include"
+           (is (= [:postmeta/customer]
+                  (mapv
+                   :id
+                   (profile/enabled-rules
+                    valid-profile
+                    {:tables [:postmeta]})))))
+  (testing "rule exclusion"
+           (is (= [:users/profile :postmeta/customer]
+                  (mapv
+                   :id
+                   (profile/enabled-rules
+                    valid-profile
+                    {:exclude-rules [:stream/logs]}))))))
+
+(deftest profiles-are-easy-to-inspect-at-the-repl
+  (is (= {:name :wordpress
+          :rule-count 3
+          :rule-ids [:users/profile :postmeta/customer :stream/logs]
+          :tables [:users :postmeta :stream]}
+         (profile/summary valid-profile)))
+  (is (= :postmeta/customer
+         (:id (profile/rule-by-id valid-profile :postmeta/customer)))))

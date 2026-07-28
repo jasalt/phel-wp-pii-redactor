@@ -1,6 +1,5 @@
 (ns tests.pii.redactor.core-test
   (:require phel.test :refer [deftest is testing])
-  (:require phel.string :as s)
   (:require pii.redactor.core :as core))
 
 (def default-options
@@ -136,16 +135,22 @@
            (:params (first (:queries plan)))))
     (is (= 1 (core/replacement-count (:replacements plan) :emails)))))
 
-(deftest residual-cache-and-import-plans-are-pure
-  (let [wpml-plan
-        (core/plan-wpml-cache
-         (core/new-plan (core/empty-replacements))
-         [{:name "wpml-cache-translators-test"
-           :value "translator=Alice@Example.com"}])
-        wpml-value (first (:params (first (:queries wpml-plan))))]
-    (is (= 1 (count (:queries wpml-plan))))
-    (is (s/contains? wpml-value "anon-ff8d9819fc0e@localhost.localdomain"))
-    (is (= 1 (count (:changes wpml-plan)))))
+(deftest disposable-cache-and-import-plans-are-pure
+  (let [empty-plan (core/new-plan (core/empty-replacements))
+        disabled   (core/plan-wpml-cache
+                    empty-plan
+                    {:redact-options false}
+                    [{:name "wpml-cache-translators-test"}])
+        enabled    (core/plan-wpml-cache
+                    empty-plan
+                    {:redact-options true}
+                    [{:name "wpml-cache-translators-test"}])]
+    (is (= empty-plan disabled))
+    (is (= "DELETE FROM wp_options WHERE option_name=?"
+           (:sql (first (:queries enabled)))))
+    (is (= ["wpml-cache-translators-test"]
+           (:params (first (:queries enabled)))))
+    (is (= :delete-cache (:type (first (:changes enabled))))))
   (let [wxr-plan
         (core/plan-wxr-imports
          (core/new-plan (core/empty-replacements))
@@ -155,9 +160,24 @@
     (is (= 2 (count (:changes wxr-plan))))
     (is (= ["[REDACTED]" 2] (:params (second (:queries wxr-plan)))))))
 
-(deftest stream-plan-is-explicit-data
+(deftest generated-registry-values-are-idempotent
+  (let [[emails email-value]
+        (core/register-email
+         (core/empty-replacements)
+         "anon-ff8d9819fc0e@localhost.localdomain")
+        [urls url-value]
+        (core/register-url
+         (core/empty-replacements)
+         "https://redacted.example.invalid/path/83a0d374c8ac")]
+    (is (= 0 (core/replacement-count emails :emails)))
+    (is (= 0 (core/replacement-count urls :urls)))
+    (is (= "anon-ff8d9819fc0e@localhost.localdomain" email-value))
+    (is (= "https://redacted.example.invalid/path/83a0d374c8ac" url-value))))
+
+(deftest stream-plan-is-transactional-data
   (let [empty-plan (core/new-plan (core/empty-replacements))]
-    (is (= empty-plan (core/plan-stream-truncate empty-plan 0)))
-    (let [plan (core/plan-stream-truncate empty-plan 42)]
-      (is (= "TRUNCATE TABLE wp_stream" (:sql (first (:queries plan)))))
+    (is (= empty-plan (core/plan-stream-delete empty-plan nil)))
+    (is (= empty-plan (core/plan-stream-delete empty-plan 0)))
+    (let [plan (core/plan-stream-delete empty-plan 42)]
+      (is (= "DELETE FROM wp_stream" (:sql (first (:queries plan)))))
       (is (= 42 (:count (first (:changes plan))))))))

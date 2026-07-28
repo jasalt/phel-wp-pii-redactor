@@ -10,10 +10,28 @@
         code   (cli/run main/app input output)
         text   (cli/output->string output)]
     (is (= 0 code))
+    (is (s/contains? text "--apply"))
     (is (s/contains? text "--dry-run"))
+    (is (s/contains? text "--show-values"))
     (is (s/contains? text "--summary"))
     (is (s/contains? text "--whitelist-users"))
-    (is (s/contains? text "Use --dry-run before every live run"))))
+    (is (s/contains? text "Planning is the default"))))
+
+(deftest execution-mode-requires-explicit-write-intent
+  (is (= :plan (main/execution-mode false false)))
+  (is (= :plan (main/execution-mode false true)))
+  (is (= :apply (main/execution-mode true false)))
+  (is (thrown? InvalidArgumentException
+               (main/execution-mode true true))))
+
+(deftest query-previews-hide-parameters-by-default
+  (let [preview (main/query-preview
+                 nil
+                 {}
+                 {:sql "UPDATE users SET email=? WHERE ID=?"
+                  :params ["person@example.org" 1]})]
+    (is (s/contains? preview "parameters hidden: 2"))
+    (is (not (s/contains? preview "person@example.org")))))
 
 (deftest cli-reports-its-version
   (let [input  (cli/argv ["--version"])
