@@ -24,7 +24,7 @@
 (defn valid-ip? [value]
   (and
    (string? value)
-   (not (false? (php/filter_var value php/\FILTER_VALIDATE_IP)))))
+   (not (false? (php/filter_var value FILTER_VALIDATE_IP)))))
 
 (defn canonicalize
   "Return the stable comparison/token form for a supported PII kind.
