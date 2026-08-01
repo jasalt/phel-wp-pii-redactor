@@ -49,15 +49,15 @@
                         (if (contains? parts :port) (str ";port=" (get parts :port)) "")
                         ";charset=utf8mb4")
         attributes
-        #php{php/\PDO::ATTR_ERRMODE php/\PDO::ERRMODE_EXCEPTION
-              php/\PDO::ATTR_DEFAULT_FETCH_MODE php/\PDO::FETCH_NUM
-              php/\PDO::ATTR_EMULATE_PREPARES false}]
+        #php {PDO/ATTR_ERRMODE PDO/ERRMODE_EXCEPTION
+              PDO/ATTR_DEFAULT_FETCH_MODE PDO/FETCH_NUM
+              PDO/ATTR_EMULATE_PREPARES false}]
     (php/new \PDO dsn (get config :user) (get config :password) attributes)))
 
 (defn fetch [pdo sql & [params]]
   (let [statement (.prepare pdo sql)]
     (.execute statement (to-php-array (or params [])))
-    (vec (map vec (.fetchAll statement php/\PDO::FETCH_NUM)))))
+    (vec (map vec (.fetchAll statement PDO/FETCH_NUM)))))
 
 (defn fetch-value [pdo sql & [params]]
   (let [statement (.prepare pdo sql)]
