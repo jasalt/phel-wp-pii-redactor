@@ -37,8 +37,8 @@
   [apply? explicit-preview?]
   (when (and apply? explicit-preview?)
     (throw
-     (php/new \InvalidArgumentException
-              "Choose either --apply or --dry-run, not both")))
+     (new InvalidArgumentException
+          "Choose either --apply or --dry-run, not both")))
   (if apply? :apply :plan))
 
 (defn options-from [ctx]

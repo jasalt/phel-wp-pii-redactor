@@ -209,8 +209,8 @@
   (let [problems (diagnostics profile)]
     (when-not (empty? problems)
       (throw
-       (php/new
-        \InvalidArgumentException
+       (php
+        InvalidArgumentException
         (s/join
          "; "
          (map #(str (:path %) " " (:message %)) problems)))))

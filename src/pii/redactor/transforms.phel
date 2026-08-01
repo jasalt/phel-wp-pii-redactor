@@ -34,8 +34,8 @@
   [kind value]
   (when-not (contains? supported-kinds kind)
     (throw
-     (php/new \InvalidArgumentException
-              (str "Unsupported PII kind: " kind))))
+     (new InvalidArgumentException
+          (str "Unsupported PII kind: " kind))))
   (let [trimmed (s/trim (or value ""))]
     (case kind
       :email (s/lower-case trimmed)
@@ -63,12 +63,12 @@
   [secret token-namespace seed length]
   (when (s/blank? secret)
     (throw
-     (php/new \InvalidArgumentException
-              "A non-empty redaction secret is required")))
+     (new InvalidArgumentException
+          "A non-empty redaction secret is required")))
   (when-not (<= 1 length 64)
     (throw
-     (php/new \InvalidArgumentException
-              "HMAC token length must be between 1 and 64")))
+     (new InvalidArgumentException
+          "HMAC token length must be between 1 and 64")))
   (let [namespace-name (if (keyword? token-namespace)
                          (name token-namespace)
                          (str token-namespace))
@@ -144,8 +144,8 @@
           (str "192.0.2." host)))
 
       (throw
-       (php/new \InvalidArgumentException
-                (str "Token strategy is not supported for kind " kind))))))
+       (new InvalidArgumentException
+            (str "Token strategy is not supported for kind " kind))))))
 
 (defn- strategy-op [strategy]
   (cond
@@ -167,8 +167,8 @@
     :clear    ""
     :constant (constant-value strategy)
     (throw
-     (php/new \InvalidArgumentException
-              (str "Unsupported redaction strategy: " strategy)))))
+     (new InvalidArgumentException
+          (str "Unsupported redaction strategy: " strategy)))))
 
 (defn redact
   "Apply one value strategy and return an inspectable result map.
