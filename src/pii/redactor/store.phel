@@ -1,0 +1,167 @@
+(ns pii.redactor.store
+  (:require phel.string :as s))
+
+;; The only V2 SQL boundary. No WordPress table names or redaction strategies
+;; belong here. SQLite is supported for isolated adapter integration tests.
+(defn identifier [value]
+  (let [text (if (keyword? value) (name value) value)]
+    (when-not (and (string? text) (re-find #"^[A-Za-z_][A-Za-z0-9_]*$" text))
+      (throw (new InvalidArgumentException "Unsafe SQL identifier")))
+    (str "`" text "`")))
+
+(defn driver [pdo]
+  (let [value (.getAttribute pdo PDO/ATTR_DRIVER_NAME)]
+    (when-not (contains? #{"mysql" "sqlite"} value)
+      (throw (new InvalidArgumentException "V2 supports MySQL and SQLite only")))
+    value))
+
+(defn fetch-rows! [pdo sql params]
+  (let [statement (.prepare pdo sql)]
+    (.execute statement (to-php-array params))
+    (mapv vec (.fetchAll statement PDO/FETCH_NUM))))
+
+(defn- column-type [native]
+  (let [type (s/lower-case native)]
+    (cond
+      (re-find #"int" type) :integer
+      (re-find #"^(char|varchar|text|tinytext|mediumtext|longtext|clob)" type) :text
+      :else :unsupported)))
+
+(defn- sqlite-schema! [pdo table]
+  (let [rows (fetch-rows! pdo (str "PRAGMA table_xinfo(" (identifier table) ")") [])]
+    (when (empty? rows)
+      (throw (new InvalidArgumentException "Required table is missing")))
+    (when (empty? (fetch-rows! pdo
+                              "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
+                              [table]))
+      (throw (new InvalidArgumentException "Views are not writable profile sources")))
+    {:table table :engine "sqlite"
+     :pk (mapv #(keyword (nth % 1)) (sort-by #(nth % 5) (filter #(pos? (nth % 5)) rows)))
+     :columns
+     (reduce
+      (fn [columns row]
+        (let [native (nth row 2)
+              length (re-find #"\((\d+)\)" native)]
+          (assoc columns (keyword (nth row 1))
+                 {:type (column-type native)
+                  :max-length (when length (int (nth length 1)))
+                  :generated (not (zero? (nth row 6)))})))
+      {} rows)}))
+
+(defn- mysql-schema! [pdo table]
+  (let [tables (fetch-rows! pdo
+                            "SELECT ENGINE, TABLE_TYPE FROM information_schema.TABLES
+                             WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?" [table])
+        rows (fetch-rows! pdo
+                          "SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, EXTRA
+                           FROM information_schema.COLUMNS
+                           WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? ORDER BY ORDINAL_POSITION"
+                          [table])]
+    (when (or (empty? tables) (empty? rows) (not= "BASE TABLE" (second (first tables))))
+      (throw (new InvalidArgumentException "Required base table is missing")))
+    {:table table :engine (first (first tables))
+     :pk (mapv #(keyword (first %))
+               (fetch-rows! pdo
+                            "SELECT COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE
+                             WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND CONSTRAINT_NAME='PRIMARY'
+                             ORDER BY ORDINAL_POSITION" [table]))
+     :columns
+     (reduce
+      (fn [columns [column native length extra]]
+        (assoc columns (keyword column)
+               {:type (column-type native)
+                :max-length (when length (int length))
+                :generated (boolean (re-find #"(?i)(VIRTUAL|STORED) GENERATED" extra))}))
+      {} rows)}))
+
+(defn table-schema! [pdo table]
+  (identifier table)
+  (if (= "sqlite" (driver pdo))
+    (sqlite-schema! pdo table)
+    (mysql-schema! pdo table)))
+
+(defn read-columns [rule]
+  (let [source (:source rule)]
+    (vec (distinct
+          (concat (:pk source)
+                  (when (:entity source) [(second (:entity source))])
+                  (case (:kind source)
+                    :rows (keys (:fields rule))
+                    :metadata [(:key source) (:value source)]
+                    (throw (new InvalidArgumentException "V2 slice supports rows and metadata only"))))))))
+
+(defn validate-schema
+  "Fail closed for schema shapes this vertical slice cannot safely execute."
+  [rule schema]
+  (let [source (:source rule)
+        columns (:columns schema)
+        targets (case (:kind source)
+                  :rows (keys (:fields rule))
+                  :metadata [(:key source) (:value source)]
+                  (throw (new InvalidArgumentException "Unsupported source kind")))]
+    (when-not (and (= 1 (count (:pk source))) (= (:pk source) (:pk schema))
+                   (= :integer (get-in columns [(first (:pk source)) :type])))
+      (throw (new InvalidArgumentException "A matching single integer primary key is required")))
+    (doseq [column :in (read-columns rule)]
+      (identifier column)
+      (when-not (contains? columns column)
+        (throw (new InvalidArgumentException "Required column is missing")))
+      (when (get-in columns [column :generated])
+        (throw (new InvalidArgumentException "Generated columns are not supported"))))
+    (doseq [column :in targets]
+      (when-not (= :text (get-in columns [column :type]))
+        (throw (new InvalidArgumentException "Target columns must have a supported text type"))))
+    (when-let [entity (:entity source)]
+      (when-not (= :integer (get-in columns [(second entity) :type]))
+        (throw (new InvalidArgumentException "Entity keys must be integers"))))
+    schema))
+
+(defn catalogue!
+  "Resolve only effective rules against a caller-supplied WordPress prefix.
+   The catalogue is schema data; it never contains user values."
+  [pdo compiled prefix]
+  (when-not (and (string? prefix) (or (= "" prefix) (re-find #"^[A-Za-z_][A-Za-z0-9_]*$" prefix)))
+    (throw (new InvalidArgumentException "Invalid table prefix")))
+  (let [tables (distinct (map #(get-in % [:source :table]) (:rules compiled)))
+        schemas (reduce
+                 (fn [acc logical]
+                   (when-not (keyword? logical)
+                     (throw (new InvalidArgumentException "V2 table names must be logical keywords")))
+                   (assoc acc logical (table-schema! pdo (str prefix (name logical)))))
+                 {} tables)]
+    (mapv (fn [rule]
+            (let [schema (validate-schema rule (get schemas (get-in rule [:source :table])))]
+              (assoc rule :schema schema :table (:table schema))))
+          (:rules compiled))))
+
+(defn assert-transactional! [rules]
+  (doseq [rule :in rules]
+    (when-not (contains? #{"innodb" "sqlite"} (s/lower-case (get-in rule [:schema :engine])))
+      (throw (new InvalidArgumentException "Atomic apply requires transactional tables")))))
+
+(defn validate-output! [rule mutation]
+  (doseq [[column value] :in (seq (:set mutation))]
+    (let [length (get-in rule [:schema :columns column :max-length])]
+      (when-not (and (string? value) (or (nil? length) (<= (php/mb_strlen value "UTF-8") length)))
+        (throw (new InvalidArgumentException "Replacement exceeds column capacity")))))
+  mutation)
+
+(defn page!
+  "Read one keyset page. Cursor is the last primary key, never an OFFSET."
+  [pdo rule cursor page-size]
+  (when-not (and (int? page-size) (<= 1 page-size 10000))
+    (throw (new InvalidArgumentException "Page size must be between 1 and 10000")))
+  (let [source (:source rule)
+        columns (read-columns rule)
+        pk (identifier (first (:pk source)))
+        keys (when (= :metadata (:kind source)) (vec (mapcat :keys (:cases rule))))
+        clauses (cond-> []
+                  (some? cursor) (conj (str pk ">?"))
+                  keys (conj (str (identifier (:key source)) " IN ("
+                                  (s/join "," (repeat (count keys) "?")) ")")))
+        params (into (if (some? cursor) [cursor] []) (or keys []))
+        sql (str "SELECT " (s/join "," (map identifier columns))
+                 " FROM " (identifier (:table rule))
+                 (if (empty? clauses) "" (str " WHERE " (s/join " AND " clauses)))
+                 " ORDER BY " pk " LIMIT " page-size)]
+    (mapv #(zipmap columns %) (fetch-rows! pdo sql params))))

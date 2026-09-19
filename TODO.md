@@ -16,7 +16,7 @@ change in `src/pii/redactor/profile.phel`.
 - [x] 2. Define exact users/usermeta profiles and a pure row-to-mutation engine.
   Apply entity exclusions to both tables; use keyed tokens without registries;
   keep raw values out of findings. Test credentials, invalid values, and repeat runs.
-- [ ] 3. Add a prefix-aware schema catalogue and paged PDO readers. Validate
+- [x] 3. Add a prefix-aware schema catalogue and paged PDO readers. Validate
   required columns, primary keys, output lengths, and transactional support;
   fail closed on unsupported schema. Test with isolated SQLite fixtures.
 - [ ] 4. Add transactional execution of primary-key/old-value-guarded mutations.
@@ -33,6 +33,9 @@ change in `src/pii/redactor/profile.phel`.
   targets, conservative delete overlaps, unknown selectors, and invalid strategies.
 - Task 2: 184 tests passed; lint clean. Tests exercise all six rules, linked
   exclusions, exact metadata transformations, credential clearing, and idempotence.
+- Task 3: 204 tests passed; lint clean. SQLite integration covers prefix resolution,
+  primary-key pagination, exact metadata reads, missing tables, output capacity,
+  schema rejection, and identifier safety. MySQL catalogue queries are not live-tested.
 - This environment has PHP 8.5 and PDO SQLite, but no PDO MySQL driver or `php8.4`
   binary. Run checks with `php vendor/bin/phel`; SQLite integration tests cannot
   establish MySQL deployment compatibility. Record that limitation explicitly.

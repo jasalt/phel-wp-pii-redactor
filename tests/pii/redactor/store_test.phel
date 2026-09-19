@@ -1,0 +1,64 @@
+(ns tests.pii.redactor.store-test
+  (:require phel.test :refer [deftest is])
+  (:require pii.redactor.compiler :as compiler)
+  (:require pii.redactor.store :as store)
+  (:require pii.redactor.wordpress :as wordpress)
+  (:require tests.pii.redactor.fixtures :as fixtures))
+
+(defn rules [pdo & [options]]
+  (store/catalogue! pdo (compiler/compile-profile wordpress/user-profile (or options {})) "site_"))
+
+(deftest catalogue-resolves-custom-prefix-and-primary-keys
+  (let [pdo (fixtures/database)
+        resolved (rules pdo)]
+    (is (= 6 (count resolved)))
+    (is (= "site_users" (:table (first resolved))))
+    (is (= [:ID] (get-in (first resolved) [:schema :pk])))
+    (is (= 100 (get-in (first resolved) [:schema :columns :user_email :max-length])))))
+
+(deftest readers-page-by-primary-key-and-dispatch-exact-metadata
+  (let [pdo (fixtures/database)
+        resolved (rules pdo)
+        user-rule (first resolved)
+        meta-rule (nth resolved 3)]
+    (is (= [1] (mapv :ID (store/page! pdo user-rule nil 1))))
+    (is (= [2] (mapv :ID (store/page! pdo user-rule 1 1))))
+    (is (= [] (store/page! pdo user-rule 2 1)))
+    (is (= ["first_name" "first_name"] (mapv :meta_key (store/page! pdo meta-rule nil 10))))
+    (is (thrown? InvalidArgumentException (store/page! pdo user-rule nil 0)))))
+
+(deftest excluded-tables-are-not-required
+  (let [pdo (fixtures/database)]
+    (.exec pdo "DROP TABLE site_usermeta")
+    (is (= 3 (count (rules pdo {:tables [:users]}))))
+    (is (thrown? InvalidArgumentException (rules pdo)))))
+
+(deftest schema-fails-closed
+  (let [pdo (fixtures/database)
+        selected (first (rules pdo))
+        schema (:schema selected)]
+    (is (thrown? InvalidArgumentException
+                 (store/validate-schema selected (assoc schema :pk []))))
+    (is (thrown? InvalidArgumentException
+                 (store/validate-schema selected
+                                        (assoc-in schema [:columns :user_email :generated] true))))
+    (is (thrown? InvalidArgumentException
+                 (store/validate-schema selected
+                                        (assoc-in schema [:columns :user_email :type] :integer))))
+    (is (thrown? InvalidArgumentException
+                 (store/assert-transactional! [(assoc-in selected [:schema :engine] "MyISAM")])))))
+
+(deftest replacements-are-checked-against-column-capacity
+  (let [pdo (fixtures/database)
+        selected (first (rules pdo))]
+    (is (= {:set {:user_login "short"}}
+           (store/validate-output! selected {:set {:user_login "short"}})))
+    (is (thrown? InvalidArgumentException
+                 (store/validate-output! selected {:set {:user_login (apply str (repeat 61 "x"))}})))))
+
+(deftest identifiers-and-prefixes-cannot-inject-sql
+  (is (= "`user_email`" (store/identifier :user_email)))
+  (is (thrown? InvalidArgumentException (store/identifier "users; DROP TABLE users")))
+  (is (thrown? InvalidArgumentException
+               (store/catalogue! (fixtures/database)
+                                 (compiler/compile-profile wordpress/user-profile {}) "site_;"))))

@@ -1,0 +1,22 @@
+(ns tests.pii.redactor.fixtures)
+
+(defn database []
+  (let [pdo (new PDO "sqlite::memory:")]
+    (.setAttribute pdo PDO/ATTR_ERRMODE PDO/ERRMODE_EXCEPTION)
+    (.exec pdo "PRAGMA foreign_keys=ON")
+    (.exec pdo "CREATE TABLE site_users (
+                ID INTEGER PRIMARY KEY, user_login VARCHAR(60) UNIQUE,
+                user_nicename VARCHAR(50), user_email VARCHAR(100), user_url VARCHAR(100),
+                display_name VARCHAR(250), user_pass VARCHAR(255), user_activation_key VARCHAR(255))")
+    (.exec pdo "CREATE TABLE site_usermeta (
+                umeta_id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES site_users(ID),
+                meta_key VARCHAR(255), meta_value TEXT)")
+    (.exec pdo "INSERT INTO site_users VALUES
+                (1, 'alice', 'alice', 'alice@example.org', 'https://example.org/alice', 'Alice', 'hash-a', 'reset-a'),
+                (2, 'bob', 'bob', 'bob@example.org', '', 'Bob', 'hash-b', 'reset-b')")
+    (.exec pdo "INSERT INTO site_usermeta VALUES
+                (1, 1, 'first_name', 'Alice'), (2, 2, 'first_name', 'Bob'),
+                (3, 1, 'session_tokens', 'serialized-a'), (4, 2, 'session_tokens', 'serialized-b'),
+                (5, 2, 'description_en', 'Personal biography'), (6, 2, 'unrelated', 'Keep this'),
+                (7, 2, 'jabber', 'private-handle'), (8, 2, '_application_passwords', 'serialized-passwords')")
+    pdo))
