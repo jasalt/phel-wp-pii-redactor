@@ -1,0 +1,108 @@
+(ns pii.redactor.compiler
+  (:require pii.redactor.profile :as profile))
+
+(defn- require! [condition message]
+  (when-not condition
+    (throw (new InvalidArgumentException message))))
+
+(defn strategy-op [strategy]
+  (cond
+    (keyword? strategy) strategy
+    (vector? strategy) (first strategy)
+    (map? strategy) (:op strategy)))
+
+(defn- validate-field! [spec]
+  (let [strategy (:strategy spec)
+        op       (strategy-op strategy)]
+    (require!
+     (or (not= op :token) (contains? #{:email :url :ip :login} (:kind spec)))
+     "Token strategy requires email, URL, IP, or login kind")
+    (when (= op :constant)
+      (require! (string? (if (map? strategy) (:value strategy) (second strategy)))
+                "Constant replacements must be strings"))))
+
+(defn- validate-rule! [rule]
+  (let [source (:source rule)]
+    (when (contains? #{:rows :metadata} (:kind source))
+      (require! (every? keyword? (:pk source)) "Primary key columns must be keywords")
+      (when-let [entity (:entity source)]
+        (require! (and (vector? entity) (= 2 (count entity)) (every? keyword? entity))
+                  "Entity must be a [type column] vector")))
+    (case (:kind source)
+      :rows
+      (do
+        (require! (not (empty? (:fields rule))) "Row rules need at least one field")
+        (require! (every? keyword? (keys (:fields rule))) "Field columns must be keywords")
+        (doseq [spec :in (vals (:fields rule))] (validate-field! spec)))
+      :metadata
+      (do
+        (require! (not (empty? (:cases rule))) "Metadata rules need at least one case")
+        (doseq [spec :in (:cases rule)]
+          (require! (every? string? (:keys spec)) "Metadata keys must be strings")
+          (validate-field! spec)))
+      nil)))
+
+(defn target-claims
+  "Describe mutation ownership without SQL. Deletes conservatively own a table;
+   metadata cases own exact keys; schema-audit rules own no mutation targets."
+  [rule]
+  (let [source (:source rule)
+        base   {:rule (:id rule) :table (:table source)}]
+    (case (:kind source)
+      :rows (mapv #(assoc base :column %) (keys (:fields rule)))
+      :metadata
+      (vec (mapcat
+            (fn [spec]
+              (map #(assoc base :column (:value source)
+                               :key-column (:key source) :meta-key %)
+                   (:keys spec)))
+            (:cases rule)))
+      :delete [(assoc base :delete true)]
+      [])))
+
+(defn- overlap? [left right]
+  (and
+   (= (:table left) (:table right))
+   (or (:delete left) (:delete right)
+       (and (= (:column left) (:column right))
+            (or (not (contains? left :meta-key))
+                (not (contains? right :meta-key))
+                (not= (:key-column left) (:key-column right))
+                (= (:meta-key left) (:meta-key right)))))))
+
+(defn assert-single-owner
+  "Reject overlapping writes, including duplicate cases inside a single rule."
+  [rules]
+  (reduce
+   (fn [seen claim]
+     (when-let [owner (find #(overlap? % claim) seen)]
+       (throw (new InvalidArgumentException
+                   (str "Overlapping mutation targets: " (:rule owner) " and " (:rule claim)))))
+     (conj seen claim))
+   []
+   (mapcat target-claims rules))
+  rules)
+
+(defn- validate-selectors! [rules options]
+  (doseq [[option known] :in
+          [[:rules (set (map :id rules))]
+           [:exclude-rules (set (map :id rules))]
+           [:categories (set (map :category rules))]
+           [:exclude-categories (set (map :category rules))]
+           [:tables (set (map #(get-in % [:source :table]) rules))]
+           [:exclude-tables (set (map #(get-in % [:source :table]) rules))]]]
+    (require! (every? #(contains? known %) (get options option []))
+              (str "Unknown selector in " option))))
+
+(defn compile-profile
+  "Validate and select a plain profile. Scope is resolved once, before I/O.
+   Overlap checks apply to the effective rules, independent of their order."
+  [input options]
+  (profile/assert-valid input)
+  (doseq [rule :in (:rules input)] (validate-rule! rule))
+  (validate-selectors! (:rules input) options)
+  (let [rules (filterv
+               #(and (not (contains? (set (:exclude-categories options [])) (:category %)))
+                     (not (contains? (set (:exclude-tables options [])) (get-in % [:source :table]))))
+               (profile/enabled-rules input options))]
+    {:name (:name input) :rules (assert-single-owner rules)}))

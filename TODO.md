@@ -11,7 +11,7 @@ Each numbered task is a separate implementation commit; update this checklist
 and run the relevant tests before committing. Preserve the pre-existing local
 change in `src/pii/redactor/profile.phel`.
 
-- [ ] 1. Add a pure compiler with centralized selectors, field/strategy validation,
+- [x] 1. Add a pure compiler with centralized selectors, field/strategy validation,
   and overlapping-target rejection. Test row, metadata, and delete conflicts.
 - [ ] 2. Define exact users/usermeta profiles and a pure row-to-mutation engine.
   Apply entity exclusions to both tables; use keyed tokens without registries;
@@ -29,6 +29,8 @@ change in `src/pii/redactor/profile.phel`.
 ## Verification
 
 - Baseline: `php vendor/bin/phel test` — 140 passed; lint clean.
+- Task 1: 152 tests passed; lint clean. Compiler rejects duplicate row/metadata
+  targets, conservative delete overlaps, unknown selectors, and invalid strategies.
 - This environment has PHP 8.5 and PDO SQLite, but no PDO MySQL driver or `php8.4`
   binary. Run checks with `php vendor/bin/phel`; SQLite integration tests cannot
   establish MySQL deployment compatibility. Record that limitation explicitly.

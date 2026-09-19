@@ -1,0 +1,63 @@
+(ns tests.pii.redactor.compiler-test
+  (:require phel.test :refer [deftest is])
+  (:require pii.redactor.compiler :as compiler))
+
+(def rows
+  {:id :users/email :category :identity
+   :source {:kind :rows :table :users :pk [:ID]}
+   :fields {:user_email {:kind :email :strategy :token}}})
+
+(def metadata
+  {:id :meta/names :category :names
+   :source {:kind :metadata :table :usermeta :pk [:umeta_id]
+            :key :meta_key :value :meta_value}
+   :cases [{:keys ["first_name"] :kind :name :strategy :clear}]})
+
+(defn compile-rules [rules & [options]]
+  (compiler/compile-profile {:name :test :rules rules} (or options {})))
+
+(deftest distinct-targets-and-audits-can-coexist
+  (is (= 3 (count (:rules (compile-rules
+                          [rows metadata
+                           {:id :audit :source {:kind :schema-audit :table :users}
+                            :match "mail"}]))))))
+
+(deftest duplicate-row-targets-are-rejected
+  (is (thrown? InvalidArgumentException
+               (compile-rules [rows (assoc rows :id :other)]))))
+
+(deftest duplicate-metadata-keys-are-rejected
+  (is (thrown? InvalidArgumentException
+               (compile-rules [(assoc metadata :cases
+                                      [{:keys ["first_name" "first_name"]
+                                        :kind :name :strategy :clear}])]))))
+
+(deftest different-metadata-keys-can-share-a-value-column
+  (is (= 2 (count (:rules (compile-rules
+                          [metadata (-> metadata
+                                        (assoc :id :meta/last)
+                                        (assoc-in [:cases 0 :keys] ["last_name"]))]))))))
+
+(deftest row-and-delete-rules-conflict-with-metadata-ownership
+  (is (thrown? InvalidArgumentException
+               (compile-rules
+                [metadata (-> rows
+                              (assoc-in [:source :table] :usermeta)
+                              (assoc :fields {:meta_value {:kind :text :strategy :clear}}))])))
+  (is (thrown? InvalidArgumentException
+               (compile-rules
+                [metadata {:id :delete :source {:kind :delete :table :usermeta}
+                           :where :all}]))))
+
+(deftest selection-is-central-and-unknown-selectors-fail
+  (is (= [metadata] (:rules (compile-rules [rows metadata] {:exclude-tables [:users]}))))
+  (is (= [rows] (:rules (compile-rules [rows metadata] {:exclude-categories [:names]}))))
+  (is (= [rows] (:rules (compile-rules [rows (assoc rows :id :other)]
+                                     {:exclude-rules [:other]}))))
+  (is (thrown? InvalidArgumentException (compile-rules [rows] {:tables [:typo]}))))
+
+(deftest incompatible-output-strategies-fail-before-reading
+  (is (thrown? InvalidArgumentException
+               (compile-rules [(assoc-in rows [:fields :user_email :kind] :name)])))
+  (is (thrown? InvalidArgumentException
+               (compile-rules [(assoc-in rows [:fields :user_email :strategy] [:constant nil])]))))
