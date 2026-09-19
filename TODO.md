@@ -26,6 +26,11 @@ change in `src/pii/redactor/profile.phel`.
   explicit apply/database confirmation, environment-supplied secret, and uniform
   rule/category/table selectors. Document scope, usage, limitations, and verification.
 
+- [x] Prerequisite discovered during clean-checkout verification: fix the existing
+  invalid exception constructor in committed `profile.phel`. Commit the equivalent
+  `(new InvalidArgumentException ...)` form while preserving the user's working-tree
+  shorthand `(InvalidArgumentException. ...)` byte-for-byte and uncommitted.
+
 ## Verification
 
 - Baseline: `php vendor/bin/phel test` — 140 passed; lint clean.
@@ -39,6 +44,9 @@ change in `src/pii/redactor/profile.phel`.
 - Task 4: 246 tests passed; lint clean. Real SQLite updates prove linked exclusions,
   no-write preview, rollback after late write/capacity failures, rollback on failed
   verification, null/case-sensitive CAS guards, and a zero-change second apply.
+- Clean committed-tree verification initially exposed the pre-existing profile
+  compile error hidden by the local edit. With the independent prerequisite fix,
+  an isolated export passes all 246 tests for tasks 1–4 and lint.
 - This environment has PHP 8.5 and PDO SQLite, but no PDO MySQL driver or `php8.4`
   binary. Run checks with `php vendor/bin/phel`; SQLite integration tests cannot
   establish MySQL deployment compatibility. Record that limitation explicitly.
