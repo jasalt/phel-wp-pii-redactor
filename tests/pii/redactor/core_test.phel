@@ -57,7 +57,7 @@
                  ["wp_comments" "comment_author_email"]
                  ["wp_users" "display_name"]
                  ["wp_users" "user_login"]])]
-    (is (= ["wp_comments" "wp_users"] (vec (map :table tables))))
+    (is (= ["wp_comments" "wp_users"] (mapv :table tables)))
     (is (= ["comment_author_email"]
            (vec (core/columns-for tables "wp_comments" :email))))
     (is (= ["display_name"]

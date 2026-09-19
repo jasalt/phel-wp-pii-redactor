@@ -57,7 +57,7 @@
 (defn fetch [pdo sql & [params]]
   (let [statement (.prepare pdo sql)]
     (.execute statement (to-php-array (or params [])))
-    (vec (map vec (.fetchAll statement PDO/FETCH_NUM)))))
+    (mapv vec (.fetchAll statement PDO/FETCH_NUM))))
 
 (defn fetch-value [pdo sql & [params]]
   (let [statement (.prepare pdo sql)]

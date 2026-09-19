@@ -17,7 +17,7 @@
 (deftest registry-covers-every-table-concern-in-pipeline-order
   (is (= [:columns :usermeta :logins :comment-authors
           :postmeta-values :wpml-cache :wxr-imports :stream-logs]
-         (vec (map :id policies/table-policies))))
+         (mapv :id policies/table-policies)))
   (is (every? #(and (:id %) (:doc %) (:load %) (:plan %))
               policies/table-policies)))
 
@@ -78,10 +78,10 @@
                   :users [{:id 1 :login "alice" :nicename "" :display-name ""}
                           {:id 2 :login "bob" :nicename "" :display-name ""}]
                   :authors ["alice"]}
-        selected (vec (filter
-                       #(contains? #{:columns :usermeta :logins :comment-authors}
-                         (:id %))
-                       policies/table-policies))
+        selected (filterv
+                  #(contains? #{:columns :usermeta :logins :comment-authors}
+                    (:id %))
+                  policies/table-policies)
         result   (policies/interpret-policies ctx selected)]
     (testing "usermeta + per-user logins + password + comment author"
              (is (= 4 (count (get-in result [:plan :queries])))))
