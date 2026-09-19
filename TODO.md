@@ -19,7 +19,7 @@ change in `src/pii/redactor/profile.phel`.
 - [x] 3. Add a prefix-aware schema catalogue and paged PDO readers. Validate
   required columns, primary keys, output lengths, and transactional support;
   fail closed on unsupported schema. Test with isolated SQLite fixtures.
-- [ ] 4. Add transactional execution of primary-key/old-value-guarded mutations.
+- [x] 4. Add transactional execution of primary-key/old-value-guarded mutations.
   Verify affected counts and post-apply idempotence before commit. Test actual
   database exclusions, rollback, stale writes, and a zero-mutation second apply.
 - [ ] 5. Expose the slice through an opt-in V2 command with safe count-only reports,
@@ -36,6 +36,9 @@ change in `src/pii/redactor/profile.phel`.
 - Task 3: 204 tests passed; lint clean. SQLite integration covers prefix resolution,
   primary-key pagination, exact metadata reads, missing tables, output capacity,
   schema rejection, and identifier safety. MySQL catalogue queries are not live-tested.
+- Task 4: 246 tests passed; lint clean. Real SQLite updates prove linked exclusions,
+  no-write preview, rollback after late write/capacity failures, rollback on failed
+  verification, null/case-sensitive CAS guards, and a zero-change second apply.
 - This environment has PHP 8.5 and PDO SQLite, but no PDO MySQL driver or `php8.4`
   binary. Run checks with `php vendor/bin/phel`; SQLite integration tests cannot
   establish MySQL deployment compatibility. Record that limitation explicitly.

@@ -1,0 +1,132 @@
+(ns tests.pii.redactor.runner-test
+  (:require phel.test :refer [deftest is])
+  (:require phel.string :as s)
+  (:require pii.redactor.runner :as runner)
+  (:require pii.redactor.store :as store)
+  (:require pii.redactor.wordpress :as wordpress)
+  (:require tests.pii.redactor.fixtures :as fixtures))
+
+(def secret "integration-secret")
+(def options {:prefix "site_" :page-size 1})
+
+(defn snapshot [pdo]
+  [(store/fetch-rows! pdo "SELECT * FROM site_users ORDER BY ID" [])
+   (store/fetch-rows! pdo "SELECT * FROM site_usermeta ORDER BY umeta_id" [])])
+
+(defn run [pdo & [extra]]
+  (runner/run! pdo wordpress/user-profile secret (merge options (or extra {}))))
+
+(deftest preview-is-read-only-and-reports-no-values
+  (let [pdo (fixtures/database)
+        before (snapshot pdo)
+        report (run pdo)
+        rendered (str report)]
+    (is (pos? (:mutations report)))
+    (is (= 0 (:affected report)))
+    (is (= :plan (:mode report)))
+    (is (= before (snapshot pdo)))
+    (is (not (.inTransaction pdo)))
+    (is (not (s/contains? rendered "example.org")))
+    (is (not (s/contains? rendered "hash-a")))
+    (is (not (s/contains? rendered secret)))))
+
+(deftest apply-is-verified-and-second-run-is-a-no-op
+  (let [pdo (fixtures/database)
+        report (run pdo {:apply true})]
+    (is (:verified report))
+    (is (= (:mutations report) (:affected report)))
+    (is (pos? (:affected report)))
+    (is (= [["*" ""] ["*" ""]]
+           (store/fetch-rows! pdo "SELECT user_pass, user_activation_key FROM site_users ORDER BY ID" [])))
+    (is (= [["Anonymous"] ["Anonymous"] [""] [""] [""] ["Keep this"] [""] [""]]
+           (store/fetch-rows! pdo "SELECT meta_value FROM site_usermeta ORDER BY umeta_id" [])))
+    (is (= 0 (:mutations (run pdo {:apply true}))))
+    (is (= 0 (:mutations (run pdo))))))
+
+(deftest keep-user-exemptions-cover-user-fields-and-linked-metadata
+  (let [pdo (fixtures/database)
+        before-user (store/fetch-rows! pdo "SELECT * FROM site_users WHERE ID=1" [])
+        before-meta (store/fetch-rows! pdo "SELECT * FROM site_usermeta WHERE user_id=1" [])]
+    (run pdo {:apply true :keep-users ["ALICE"]})
+    (is (= before-user (store/fetch-rows! pdo "SELECT * FROM site_users WHERE ID=1" [])))
+    (is (= before-meta (store/fetch-rows! pdo "SELECT * FROM site_usermeta WHERE user_id=1" [])))
+    (is (= [["Anonymous"]] (store/fetch-rows! pdo "SELECT display_name FROM site_users WHERE ID=2" [])))
+    (is (= 0 (:mutations (run pdo {:apply true :keep-users ["alice"]}))))))
+
+(deftest table-and-category-selection-are-global
+  (let [pdo (fixtures/database)
+        before-meta (second (snapshot pdo))]
+    (run pdo {:apply true :tables [:users] :exclude-categories [:names]})
+    (is (= before-meta (second (snapshot pdo))))
+    (is (= [["Alice"] ["Bob"]]
+           (store/fetch-rows! pdo "SELECT display_name FROM site_users ORDER BY ID" [])))))
+
+(deftest unknown-exemptions-and-empty-secrets-fail-before-writes
+  (let [pdo (fixtures/database)
+        before (snapshot pdo)]
+    (is (thrown? InvalidArgumentException (run pdo {:apply true :keep-users ["missing"]})))
+    (is (thrown? InvalidArgumentException
+                 (runner/run! pdo wordpress/user-profile "" (assoc options :apply true))))
+    (is (= before (snapshot pdo)))
+    (is (not (.inTransaction pdo)))))
+
+(deftest later-write-failure-rolls-back-earlier-mutations
+  (let [pdo (fixtures/database)
+        before (snapshot pdo)]
+    ;; This trigger fires after identity/name changes have already executed.
+    (.exec pdo "CREATE TRIGGER fail_credentials BEFORE UPDATE OF user_pass ON site_users
+                BEGIN SELECT RAISE(ABORT, 'fixture failure'); END")
+    (is (thrown? PDOException (run pdo {:apply true})))
+    (is (= before (snapshot pdo)))
+    (is (not (.inTransaction pdo)))))
+
+(deftest post-apply-verification-failure-rolls-back
+  (let [pdo (fixtures/database)
+        before (snapshot pdo)]
+    (.exec pdo "CREATE TRIGGER undo_name AFTER UPDATE OF display_name ON site_users
+                BEGIN UPDATE site_users SET display_name='Still personal' WHERE ID=NEW.ID; END")
+    (is (thrown? RuntimeException (run pdo {:apply true})))
+    (is (= before (snapshot pdo)))))
+
+(deftest stale-and-case-only-writes-are-rejected
+  (let [pdo (fixtures/database)
+        mutation {:locator {:table "site_users" :pk {:ID 1}}
+                  :expected {:display_name "ALICE"} :set {:display_name "Anonymous"}}]
+    (is (thrown? RuntimeException (store/apply-mutation! pdo mutation)))
+    (.beginTransaction pdo)
+    (try
+      (is (thrown? RuntimeException (store/apply-mutation! pdo mutation)))
+      (is (= 1 (store/apply-mutation! pdo (assoc mutation :expected {:display_name "Alice"}))))
+      (is (thrown? RuntimeException
+                   (store/apply-mutation! pdo (assoc mutation :expected {:display_name "Alice"}))))
+      (finally (.rollBack pdo)))))
+
+(deftest late-output-capacity-failure-rolls-back
+  (let [pdo (fixtures/database)
+        before (snapshot pdo)
+        input (assoc-in wordpress/user-profile [:rules 1 :fields :display_name :strategy]
+                        [:constant (php/str_repeat "x" 251)])]
+    (is (thrown? InvalidArgumentException
+                 (runner/run! pdo input secret (assoc options :apply true))))
+    (is (= before (snapshot pdo)))))
+
+(deftest a-caller-transaction-is-never-committed-or-rolled-back
+  (let [pdo (fixtures/database)]
+    (.beginTransaction pdo)
+    (try
+      (is (thrown? RuntimeException (run pdo {:apply true})))
+      (is (.inTransaction pdo))
+      (finally (.rollBack pdo)))))
+
+(deftest null-old-values-and-mysql-binary-guards-compile
+  (let [mutation {:locator {:table "site_users" :pk {:ID 1}}
+                  :expected {:display_name nil} :set {:display_name "Anonymous"}}
+        mysql (store/mutation-query "mysql" mutation)
+        pdo (fixtures/database)]
+    (is (s/contains? (:sql mysql) "`display_name` IS NULL"))
+    (is (s/contains? (:sql mysql) "CAST(`ID` AS BINARY)=CAST(? AS BINARY)"))
+    (is (= ["Anonymous" 1] (:params mysql)))
+    (.exec pdo "UPDATE site_users SET display_name=NULL WHERE ID=1")
+    (.beginTransaction pdo)
+    (try (is (= 1 (store/apply-mutation! pdo mutation)))
+         (finally (.rollBack pdo)))))

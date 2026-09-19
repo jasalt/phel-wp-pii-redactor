@@ -1,0 +1,97 @@
+(ns pii.redactor.runner
+  (:require phel.string :as s)
+  (:require pii.redactor.compiler :as compiler)
+  (:require pii.redactor.engine :as engine)
+  (:require pii.redactor.store :as store)
+  (:require pii.redactor.transforms :as transforms))
+
+(defn- add-findings [counts findings]
+  (reduce (fn [acc finding]
+            (let [status (:status finding)]
+              (assoc acc status (inc (get acc status 0)))))
+          counts findings))
+
+(defn process-rule!
+  "Process bounded pages, retaining only counters between pages. Preview never
+   invokes the write adapter. Reports never receive values or mutation payloads."
+  [pdo rule secret options apply?]
+  (let [pk (first (get-in rule [:source :pk]))]
+    (loop [cursor nil
+           report {:rule (:id rule) :mutations 0 :affected 0 :findings {}}]
+      (let [rows (store/page! pdo rule cursor (:page-size options 500))]
+        (if (empty? rows)
+          report
+          (recur
+           (get (peek rows) pk)
+           (reduce
+            (fn [acc values]
+              (let [row (engine/normalize-row rule (:table rule) values)
+                    result (engine/transform-row secret rule row options)
+                    mutations (:mutations result)
+                    affected (reduce
+                              (fn [total mutation]
+                                (store/validate-output! rule mutation)
+                                (+ total (if apply? (store/apply-mutation! pdo mutation) 0)))
+                              0 mutations)]
+                (-> acc
+                    (update :mutations + (count mutations))
+                    (update :affected + affected)
+                    (update :findings add-findings (:findings result)))))
+            report rows)))))))
+
+(defn resolve-exemptions!
+  "Resolve keep-login requests to entity IDs before any writes. Every matching
+   ID is preserved across users and usermeta. Unknown requests fail closed."
+  [pdo prefix options]
+  (let [requested (set (map #(s/lower-case (s/trim %)) (:keep-users options [])))
+        initial (set (:keep-entities options []))]
+    (if (empty? requested)
+      initial
+      (let [source {:kind :rows :table :users :pk [:ID]}
+            rule {:id :exemptions :source source
+                  :fields {:user_login {:kind :login :strategy :token}}}
+            schema (store/table-schema! pdo (str prefix "users"))
+            resolved (assoc rule :table (:table schema)
+                                 :schema (store/validate-schema rule schema))]
+        (loop [cursor nil found #{} entities initial]
+          (let [rows (store/page! pdo resolved cursor (:page-size options 500))]
+            (if (empty? rows)
+              (if (= requested found)
+                entities
+                (throw (new InvalidArgumentException "One or more keep-user requests did not match")))
+              (let [matches (filter #(contains? requested (s/lower-case (:user_login %))) rows)]
+                (recur (:ID (peek rows))
+                       (into found (map #(s/lower-case (:user_login %)) matches))
+                       (into entities (map #(vector :user (str (:ID %))) matches)))))))))))
+
+(defn run!
+  "Run a fresh scoped plan or an atomic apply, never a saved SQL plan.
+   Apply includes a second read/transform pass before commit. This slice is for
+   offline database clones; it is not an online concurrent-writer protocol."
+  [pdo input secret options]
+  ;; Validate even an empty selection or database; never silently use an empty key.
+  (transforms/hmac-token secret :preflight "preflight" 1)
+  (when (.inTransaction pdo)
+    (throw (new RuntimeException "V2 requires ownership of its transaction")))
+  (let [compiled (compiler/compile-profile input options)
+        rules (store/catalogue! pdo compiled (:prefix options))
+        apply? (true? (:apply options))]
+    (when apply? (store/assert-transactional! rules))
+    (.beginTransaction pdo)
+    (try
+      (let [effective (assoc options :keep-entities
+                             (resolve-exemptions! pdo (:prefix options) options))
+            reports (mapv #(process-rule! pdo % secret effective apply?) rules)
+            mutations (reduce + 0 (map :mutations reports))
+            affected (reduce + 0 (map :affected reports))]
+        (when apply?
+          (let [verification (mapv #(process-rule! pdo % secret effective false) rules)]
+            (when (or (not= mutations affected)
+                      (some #(pos? (:mutations %)) verification))
+              (throw (new RuntimeException "Post-apply verification failed")))))
+        (if apply? (.commit pdo) (.rollBack pdo))
+        {:mode (if apply? :apply :plan) :profile (:name compiled)
+         :mutations mutations :affected affected :verified apply? :rules reports})
+      (catch Throwable error
+        (when (.inTransaction pdo) (.rollBack pdo))
+        (throw error)))))

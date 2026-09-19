@@ -165,3 +165,39 @@
                  (if (empty? clauses) "" (str " WHERE " (s/join " AND " clauses)))
                  " ORDER BY " pk " LIMIT " page-size)]
     (mapv #(zipmap columns %) (fetch-rows! pdo sql params))))
+
+(defn mutation-query
+  "Compile a row mutation to an exact old-value-guarded prepared UPDATE.
+   Binary text comparisons avoid MySQL case-insensitive collation false matches."
+  [driver-name mutation]
+  (let [pk (get-in mutation [:locator :pk])
+        changes (seq (:set mutation))
+        guards (seq (merge (:expected mutation) pk))]
+    (when (or (empty? pk) (some nil? (vals pk)) (empty? changes)
+              (not (every? #(contains? (:expected mutation) %) (keys (:set mutation)))))
+      (throw (new InvalidArgumentException "Mutation requires a primary key and old field values")))
+    {:sql (str "UPDATE " (identifier (get-in mutation [:locator :table]))
+               " SET " (s/join "," (map #(str (identifier (first %)) "=?") changes))
+               " WHERE "
+               (s/join " AND "
+                       (map (fn [[column value]]
+                              (cond
+                                (nil? value) (str (identifier column) " IS NULL")
+                                (= driver-name "mysql")
+                                (str "CAST(" (identifier column) " AS BINARY)=CAST(? AS BINARY)")
+                                :else (str (identifier column) " COLLATE BINARY = ?")))
+                            guards)))
+     :params (vec (concat (map second changes)
+                          (map second (filter #(some? (second %)) guards))))}))
+
+(defn apply-mutation!
+  "Execute exactly one row mutation inside the caller's transaction."
+  [pdo mutation]
+  (when-not (.inTransaction pdo)
+    (throw (new RuntimeException "Mutation execution requires an active transaction")))
+  (let [query (mutation-query (driver pdo) mutation)
+        statement (.prepare pdo (:sql query))]
+    (.execute statement (to-php-array (:params query)))
+    (when-not (= 1 (.rowCount statement))
+      (throw (new RuntimeException "Stale mutation: expected exactly one affected row")))
+    1))
