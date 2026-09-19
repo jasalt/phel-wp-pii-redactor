@@ -30,6 +30,16 @@
     (is (not (s/contains? rendered "hash-a")))
     (is (not (s/contains? rendered secret)))))
 
+(deftest findings-accumulate-status-counts-across-pages
+  (let [pdo (fixtures/database)]
+    (is (= {:changed 7 :skipped 1}
+           (get-in (run pdo) [:rules 0 :findings])))
+    (is (= {:exempt 1 :changed 3 :skipped 1}
+           (get-in (run pdo {:keep-users ["alice"]}) [:rules 0 :findings])))
+    (run pdo {:apply true})
+    (is (= {:unchanged 7 :skipped 1}
+           (get-in (run pdo) [:rules 0 :findings])))))
+
 (deftest apply-is-verified-and-second-run-is-a-no-op
   (let [pdo (fixtures/database)
         report (run pdo {:apply true})]

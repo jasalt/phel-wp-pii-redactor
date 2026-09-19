@@ -6,10 +6,7 @@
   (:require pii.redactor.transforms :as transforms))
 
 (defn- add-findings [counts findings]
-  (reduce (fn [acc finding]
-            (let [status (:status finding)]
-              (assoc acc status (inc (get acc status 0)))))
-          counts findings))
+  (merge-with + counts (frequencies (map :status findings))))
 
 (defn process-rule!
   "Process bounded pages, retaining only counters between pages. Preview never
