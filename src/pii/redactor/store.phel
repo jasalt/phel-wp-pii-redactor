@@ -36,16 +36,19 @@
                               [table]))
       (throw (new InvalidArgumentException "Views are not writable profile sources")))
     {:table table :engine "sqlite"
-     :pk (mapv #(keyword (nth % 1)) (sort-by #(nth % 5) (filter #(pos? (nth % 5)) rows)))
+     :pk (->> rows
+              (keep (fn [[_cid column _native _not-null _default pk]]
+                      (when (pos? pk) [pk (keyword column)])))
+              (sort-by first)
+              (mapv second))
      :columns
      (reduce
-      (fn [columns row]
-        (let [native (nth row 2)
-              length (re-find #"\((\d+)\)" native)]
-          (assoc columns (keyword (nth row 1))
+      (fn [columns [_cid column native _not-null _default _pk hidden]]
+        (let [length (re-find #"\((\d+)\)" native)]
+          (assoc columns (keyword column)
                  {:type (column-type native)
                   :max-length (when length (int (nth length 1)))
-                  :generated (not (zero? (nth row 6)))})))
+                  :generated (not (zero? hidden))})))
       {} rows)}))
 
 (defn- mysql-schema! [pdo table]
@@ -56,11 +59,12 @@
                           "SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, EXTRA
                            FROM information_schema.COLUMNS
                            WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? ORDER BY ORDINAL_POSITION"
-                          [table])]
-    (when (or (empty? tables) (empty? rows) (not= "BASE TABLE" (second (first tables))))
+                          [table])
+        [table-engine table-type] (first tables)]
+    (when (or (empty? tables) (empty? rows) (not= "BASE TABLE" table-type))
       (throw (new InvalidArgumentException "Required base table is missing")))
-    {:table table :engine (first (first tables))
-     :pk (mapv #(keyword (first %))
+    {:table table :engine table-engine
+     :pk (mapv (fn [[column]] (keyword column))
                (fetch-rows! pdo
                             "SELECT COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE
                              WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND CONSTRAINT_NAME='PRIMARY'

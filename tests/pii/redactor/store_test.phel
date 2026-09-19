@@ -16,6 +16,17 @@
     (is (= [:ID] (get-in (first resolved) [:schema :pk])))
     (is (= 100 (get-in (first resolved) [:schema :columns :user_email :max-length])))))
 
+(deftest catalogue-preserves-key-order-and-generated-column-flags
+  (let [pdo (fixtures/database)]
+    (.exec pdo "CREATE TABLE schema_fixture (
+                second_key INTEGER, first_key INTEGER,
+                computed TEXT GENERATED ALWAYS AS ('fixture') VIRTUAL,
+                PRIMARY KEY (first_key, second_key))")
+    (let [schema (store/table-schema! pdo "schema_fixture")]
+      (is (= [:first_key :second_key] (:pk schema)))
+      (is (true? (get-in schema [:columns :computed :generated])))
+      (is (false? (get-in schema [:columns :first_key :generated]))))))
+
 (deftest readers-page-by-primary-key-and-dispatch-exact-metadata
   (let [pdo (fixtures/database)
         resolved (rules pdo)
