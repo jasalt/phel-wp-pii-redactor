@@ -12,6 +12,12 @@
         code (cli/run users-cli/app (cli/argv (into ["users"] args)) output)]
     {:code code :text (cli/output->string output)}))
 
+(deftest csv-trims-and-removes-empty-items
+  (is (= [] (users-cli/csv nil)))
+  (is (= [] (users-cli/csv "")))
+  (is (= [] (users-cli/csv " , , ")))
+  (is (= ["users" "usermeta"] (users-cli/csv " users, , usermeta, "))))
+
 (deftest help-documents-the-limited-scope-and-safety-boundary
   (let [result (invoke ["--help"])]
     (is (= 0 (:code result)))

@@ -10,7 +10,12 @@
   (:require pii.redactor.wordpress :as wordpress))
 
 (defn csv [value]
-  (if (s/blank? value) [] (vec (remove s/blank? (map s/trim (s/split value #","))))))
+  (if (s/blank? value)
+    []
+    (->> (s/split value #",")
+         (map s/trim)
+         (remove s/blank?)
+         vec)))
 
 (defn options-from [ctx]
   (let [apply? (boolean (cli/opt ctx "apply"))
