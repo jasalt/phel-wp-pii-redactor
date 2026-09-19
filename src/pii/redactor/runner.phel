@@ -5,7 +5,12 @@
   (:require pii.redactor.store :as store)
   (:require pii.redactor.transforms :as transforms))
 
-(defn- add-findings [counts findings]
+(defn- add-findings
+  "Add each finding's :status to an accumulated status-to-count map.
+   Counts field results, except :exempt findings, which represent skipped rows
+   per rule. Returns new counts without retaining findings or their payloads;
+   an empty findings collection leaves the counts unchanged."
+  [counts findings]
   (merge-with + counts (frequencies (map :status findings))))
 
 (defn process-rule!

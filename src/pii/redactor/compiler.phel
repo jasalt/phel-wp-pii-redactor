@@ -60,7 +60,14 @@
       :delete [(assoc base :delete true)]
       [])))
 
-(defn- overlap? [left right]
+(defn- overlap?
+  "Return whether two target-claims may mutate the same data.
+   Claims on different tables never overlap; a delete owns its entire table.
+   Otherwise columns must match. Whole-column writes overlap any metadata case
+   on that column. Metadata cases are disjoint only when they use the same key
+   column and different exact keys; different key columns are conservatively
+   treated as potentially selecting the same row."
+  [left right]
   (and
    (= (:table left) (:table right))
    (or (:delete left) (:delete right)
@@ -83,7 +90,14 @@
    (mapcat target-claims rules))
   rules)
 
-(defn- validate-selectors! [rules options]
+(defn- validate-selectors!
+  "Validate include/exclude selectors against the full, unfiltered rule set.
+   Rule selectors must name existing rule IDs, category selectors existing
+   categories, and table selectors existing logical source tables. Missing or
+   empty selector collections are valid. Throw InvalidArgumentException for an
+   unknown value so a typo cannot silently change scope. Does not select rules
+   or perform database I/O."
+  [rules options]
   (doseq [[option known] :in
           [[:rules (set (map :id rules))]
            [:exclude-rules (set (map :id rules))]
