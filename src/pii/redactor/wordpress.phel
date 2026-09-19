@@ -1,0 +1,36 @@
+(ns pii.redactor.wordpress)
+
+;; Exact rules only. Public content, comments, and plugins are intentionally not
+;; included in this first slice. Category selection is compiled, not interpreted
+;; independently by each handler.
+(def users-source
+  {:kind :rows :table :users :pk [:ID] :entity [:user :ID]})
+
+(def usermeta-source
+  {:kind :metadata :table :usermeta :pk [:umeta_id]
+   :key :meta_key :value :meta_value :entity [:user :user_id]})
+
+(def user-profile
+  {:name :wordpress-users
+   :rules
+   [{:id :users/identity :category :identity :source users-source
+     :fields {:user_email {:kind :email :strategy :token}
+              :user_login {:kind :login :strategy :token}
+              :user_nicename {:kind :login :strategy :token}
+              :user_url {:kind :url :strategy :token}}}
+    {:id :users/names :category :names :source users-source
+     :fields {:display_name {:kind :name :strategy [:constant "Anonymous"]}}}
+    {:id :users/credentials :category :credentials :source users-source
+     :fields {:user_pass {:kind :credential :strategy [:constant "*"]}
+              :user_activation_key {:kind :credential :strategy :clear}}}
+    {:id :usermeta/names :category :names :source usermeta-source
+     :cases [{:keys ["first_name" "last_name" "nickname"]
+              :kind :name :strategy [:constant "Anonymous"]}]}
+    {:id :usermeta/profile :category :identity :source usermeta-source
+     :cases [{:keys ["description" "biography" "description_en"]
+              :kind :text :strategy :clear}
+             {:keys ["user_url"] :kind :url :strategy :token}
+             {:keys ["aim" "yim" "jabber"] :kind :text :strategy :clear}]}
+    {:id :usermeta/credentials :category :credentials :source usermeta-source
+     :cases [{:keys ["session_tokens" "_application_passwords"]
+              :kind :credential :strategy :clear}]}]})

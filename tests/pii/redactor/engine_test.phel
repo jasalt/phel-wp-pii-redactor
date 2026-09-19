@@ -1,0 +1,72 @@
+(ns tests.pii.redactor.engine-test
+  (:require phel.test :refer [deftest is])
+  (:require pii.redactor.compiler :as compiler)
+  (:require pii.redactor.engine :as engine)
+  (:require pii.redactor.profile :as profile)
+  (:require pii.redactor.wordpress :as wordpress))
+
+(def secret "fixture-secret")
+
+(defn rule [id]
+  (profile/rule-by-id wordpress/user-profile id))
+
+(defn transform [id values & [options]]
+  (let [selected (rule id)]
+    (engine/transform-row secret selected
+                          (engine/normalize-row selected "custom_table" values)
+                          (or options {}))))
+
+(deftest wordpress-user-profile-compiles
+  (is (= 6 (count (:rules (compiler/compile-profile wordpress/user-profile {}))))))
+
+(deftest identity-tokens-are-entity-stable-and-repeatable
+  (let [values {:ID 12 :user_login "alice" :user_nicename "alice-slug"
+                :user_email "Alice@example.org" :user_url "https://example.org/alice"}
+        result (transform :users/identity values)
+        change (first (:mutations result))
+        after  (merge values (:set change))]
+    (is (= (:user_login after) (:user_nicename after)))
+    (is (not= "Alice@example.org" (:user_email after)))
+    (is (= {:table "custom_table" :pk {:ID 12}} (:locator change)))
+    (is (= values (:expected change)))
+    (is (= [] (:mutations (transform :users/identity after))))
+    (is (every? #(not (or (contains? % :before) (contains? % :after))) (:findings result)))))
+
+(deftest exclusions-cover-all-user-and-usermeta-rules
+  (let [options {:keep-entities #{[:user "12"]}}]
+    (doseq [selected :in (:rules wordpress/user-profile)]
+      (let [values (if (= :users (get-in selected [:source :table]))
+                     {:ID 12} {:umeta_id 3 :user_id 12})
+            result (engine/transform-row secret selected
+                                         (engine/normalize-row selected "custom_table" values)
+                                         options)]
+        (is (= [] (:mutations result)))
+        (is (= :exempt (:status (first (:findings result)))))))))
+
+(deftest exact-metadata-keys-have-real-strategies
+  (doseq [[id key value replacement] :in
+          [[:usermeta/names "first_name" "Alice" "Anonymous"]
+           [:usermeta/profile "description_en" "Personal biography" ""]
+           [:usermeta/profile "jabber" "private-handle" ""]
+           [:usermeta/credentials "session_tokens" "a:1:{serialized}" ""]
+           [:usermeta/credentials "_application_passwords" "credentials" ""]]]
+    (let [values {:umeta_id 1 :user_id 12 :meta_key key :meta_value value}
+          result (transform id values)
+          change (first (:mutations result))]
+      (is (= replacement (get-in change [:set :meta_value])))
+      (is (= [] (:mutations (transform id (merge values (:set change))))))))
+  (is (= [] (:mutations (transform :usermeta/names
+                                  {:umeta_id 1 :user_id 12 :meta_key "unrelated"
+                                   :meta_value "Alice"})))))
+
+(deftest credentials-are-disabled-and-cleared
+  (let [result (transform :users/credentials
+                          {:ID 12 :user_pass "password-hash" :user_activation_key "reset-token"})]
+    (is (= {:user_pass "*" :user_activation_key ""}
+           (:set (first (:mutations result)))))))
+
+(deftest invalid-targeted-values-fail-closed
+  (is (thrown? InvalidArgumentException
+               (transform :usermeta/profile
+                          {:umeta_id 1 :user_id 12 :meta_key "user_url"
+                           :meta_value "not-a-url"}))))

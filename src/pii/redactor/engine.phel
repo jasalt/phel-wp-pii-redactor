@@ -1,0 +1,61 @@
+(ns pii.redactor.engine
+  (:require pii.redactor.transforms :as transforms))
+
+(defn normalize-row
+  "Attach a locator and entity identity to a row of keyword-keyed values."
+  [rule table values]
+  (let [source (:source rule)
+        entity (:entity source)]
+    {:locator {:table table :pk (select-keys values (:pk source))}
+     :values values
+     :entity (when entity [(first entity) (str (get values (second entity)))])}))
+
+(defn field-specs
+  "Return only exact fields owned by this rule for this row."
+  [rule values]
+  (case (get-in rule [:source :kind])
+    :rows (:fields rule)
+    :metadata
+    (if-let [spec (find #(contains? (set (:keys %))
+                                   (get values (get-in rule [:source :key])))
+                       (:cases rule))]
+      {(get-in rule [:source :value]) spec}
+      {})
+    (throw (new InvalidArgumentException "The row engine only supports rows and metadata"))))
+
+(defn transform-row
+  "Pure row -> mutations + safe findings. Raw values stay inside mutations.
+   `:keep-entities` contains [type string-id] pairs, shared by all table rules.
+   Invalid targeted values fail closed rather than implying complete redaction."
+  [secret rule row options]
+  (if (contains? (set (:keep-entities options [])) (:entity row))
+    {:mutations [] :findings [{:rule (:id rule) :status :exempt}]}
+    (let [results
+          (mapv
+           (fn [[field spec]]
+             (when-not (contains? (:values row) field)
+               (throw (new InvalidArgumentException "Missing targeted field")))
+             (let [context (if (and (= :login (:kind spec)) (:entity row))
+                             {:namespace :user-login :seed (second (:entity row))}
+                             {})
+                   result  (transforms/redact secret (:kind spec) (:strategy spec)
+                                              (get (:values row) field) context)]
+               (when (= :invalid (:reason result))
+                 (throw (new InvalidArgumentException
+                             (str "Invalid value in rule " (:id rule) " field " field))))
+               {:field field :result result}))
+           (field-specs rule (:values row)))
+          changes (reduce
+                   (fn [acc entry]
+                     (if (transforms/changed? (:result entry))
+                       (assoc acc (:field entry) (get-in entry [:result :after]))
+                       acc))
+                   {} results)]
+      {:mutations (if (empty? changes)
+                    []
+                    [{:rule (:id rule) :locator (:locator row)
+                      :expected (:values row) :set changes}])
+       :findings (mapv (fn [entry]
+                         (merge {:rule (:id rule) :field (:field entry)}
+                                (select-keys (:result entry) [:kind :status :reason])))
+                       results)})))
