@@ -1,0 +1,10 @@
+(ns pii.redactor.users-entry
+  (:require phel.cli :as cli)
+  (:require pii.redactor.users-cli :refer [app]))
+
+;; Opt-in entry point. The legacy src/main.phel remains unchanged.
+(defn run []
+  (cli/run app (cli/argv (vec (cons "users" *argv*)))))
+
+(when-not *build-mode*
+  (php/exit (run)))

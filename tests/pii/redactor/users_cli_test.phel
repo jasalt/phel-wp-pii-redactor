@@ -1,0 +1,97 @@
+(ns tests.pii.redactor.users-cli-test
+  (:require phel.test :refer [deftest is])
+  (:require phel.cli :as cli)
+  (:require phel.json :as json)
+  (:require phel.string :as s)
+  (:require pii.redactor.users-cli :as users-cli)
+  (:require tests.pii.redactor.fixtures :as fixtures)
+  (:require tests.pii.redactor.runner-test :as runner-test))
+
+(defn invoke [args]
+  (let [output (cli/buffered-output)
+        code (cli/run users-cli/app (cli/argv (into ["users"] args)) output)]
+    {:code code :text (cli/output->string output)}))
+
+(deftest help-documents-the-limited-scope-and-safety-boundary
+  (let [result (invoke ["--help"])]
+    (is (= 0 (:code result)))
+    (is (s/contains? (:text result) "does NOT sanitize a whole database"))
+    (is (s/contains? (:text result) "--confirm-db"))
+    (is (s/contains? (:text result) "--exclude-categories"))
+    (is (s/contains? (:text result) "PII_REDACTION_SECRET"))))
+
+(deftest confirmation-requires-the-exact-connected-database-name
+  (is (thrown? InvalidArgumentException
+               (users-cli/confirm-target! {:apply true} {:name "clone"})))
+  (is (thrown? InvalidArgumentException
+               (users-cli/confirm-target! {:apply true :confirm-db "other"} {:name "clone"})))
+  (is (nil? (users-cli/confirm-target! {:apply true :confirm-db "clone"} {:name "clone"})))
+  (is (nil? (users-cli/confirm-target! {} {:name "clone"}))))
+
+(deftest cli-preview-apply-and-repeat-run-use-the-real-adapter
+  (let [pdo (fixtures/database)
+        before (runner-test/snapshot pdo)]
+    (with-redefs [users-cli/open-target! (fn [_path] {:pdo pdo :name "fixture-clone"})
+                  users-cli/secret-from-env (fn [] "fixture-secret")]
+      (let [preview (invoke ["--prefix" "site_" "--json"])]
+        (is (= 0 (:code preview)))
+        (is (= "plan" (:mode (json/decode (:text preview)))))
+        (is (= before (runner-test/snapshot pdo))))
+      (is (= 1 (:code (invoke ["--prefix" "site_" "--apply"]))))
+      (is (= before (runner-test/snapshot pdo)))
+      (let [applied (invoke ["--prefix" "site_" "--apply" "--confirm-db" "fixture-clone"
+                             "--keep-users" "alice" "--json"])
+            report (json/decode (:text applied))]
+        (is (= 0 (:code applied)))
+        (is (:verified report))
+        (is (pos? (:affected report)))
+        (is (not (s/contains? (:text applied) "alice")))
+        (is (not (s/contains? (:text applied) "fixture-secret"))))
+      (let [again (invoke ["--prefix" "site_" "--keep-users" "alice" "--json"])]
+        (is (= 0 (:code again)))
+        (is (= 0 (:mutations (json/decode (:text again)))))))))
+
+(deftest cli-selectors-apply-to-every-selected-rule
+  (let [pdo (fixtures/database)
+        before (runner-test/snapshot pdo)]
+    (with-redefs [users-cli/open-target! (fn [_path] {:pdo pdo :name "fixture-clone"})
+                  users-cli/secret-from-env (fn [] "fixture-secret")]
+      (let [result (invoke ["--prefix" "site_" "--apply" "--confirm-db" "fixture-clone"
+                            "--rules" "users/names,usermeta/names" "--exclude-tables" "usermeta"
+                            "--json"])
+            report (json/decode (:text result))]
+        (is (= 0 (:code result)))
+        (is (= 1 (count (:rules report))))
+        (is (= 2 (:mutations report)))
+        (is (= (second before) (second (runner-test/snapshot pdo))))))))
+
+(deftest invalid-cli-intent-is-rejected-before-connecting
+  (let [calls (new ArrayObject)]
+    (with-redefs [users-cli/open-target! (fn [_path]
+                                          (.append calls true)
+                                          (throw (new LogicException "must-not-connect")))
+                  users-cli/secret-from-env (fn [] "fixture-secret")]
+      (doseq [args :in [["--prefix" "site_" "--apply" "--dry-run"]
+                       ["--prefix" "site_" "--tables" "typo"]
+                       ["--prefix" "site_" "--page-size" "0"]
+                       ["--prefix" "site_" "--page-size" "3garbage"]
+                       []]]
+        (is (= 1 (:code (invoke args))))))
+    (is (= 0 (.count calls)))))
+
+(deftest a-missing-secret-is-rejected-before-connecting
+  (let [calls (new ArrayObject)]
+    (with-redefs [users-cli/open-target! (fn [_path] (.append calls true))
+                  users-cli/secret-from-env (fn [] "")]
+      (is (= 1 (:code (invoke ["--prefix" "site_"])))))
+    (is (= 0 (.count calls)))))
+
+(deftest database-errors-never-leak-values-even-in-verbose-json-mode
+  (with-redefs [users-cli/open-target! (fn [_path]
+                                        (throw (new PDOException "Duplicate key: private@example.org")))
+                users-cli/secret-from-env (fn [] "fixture-secret")]
+    (let [result (invoke ["--prefix" "site_" "--json" "-vvv"])]
+      (is (= 1 (:code result)))
+      (is (= users-cli/failure-message (:error (json/decode (:text result)))))
+      (is (not (s/contains? (:text result) "private@example.org")))
+      (is (not (s/contains? (:text result) "Trace"))))))

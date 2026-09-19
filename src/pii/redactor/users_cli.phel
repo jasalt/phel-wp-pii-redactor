@@ -1,0 +1,111 @@
+(ns pii.redactor.users-cli
+  (:require phel.cli :as cli)
+  (:require phel.json :as json)
+  (:require phel.string :as s)
+  (:require pii.redactor.compiler :as compiler)
+  (:require pii.redactor.db :as db)
+  (:require pii.redactor.runner :as runner)
+  (:require pii.redactor.store :as store)
+  (:require pii.redactor.transforms :as transforms)
+  (:require pii.redactor.wordpress :as wordpress))
+
+(defn csv [value]
+  (if (s/blank? value) [] (vec (remove s/blank? (map s/trim (s/split value #","))))))
+
+(defn options-from [ctx]
+  (let [apply? (boolean (cli/opt ctx "apply"))
+        dry? (boolean (cli/opt ctx "dry-run"))
+        prefix (cli/opt ctx "prefix")
+        page-size (cli/opt ctx "page-size")]
+    (when (and apply? dry?)
+      (throw (new InvalidArgumentException "Choose apply or dry-run, not both")))
+    (when-not (and (string? prefix) (re-find #"^[A-Za-z_][A-Za-z0-9_]*$" prefix))
+      (throw (new InvalidArgumentException "An explicit --prefix is required")))
+    (when-not (and (re-find #"^\d+$" page-size) (<= 1 (int page-size) 10000))
+      (throw (new InvalidArgumentException "Invalid page size")))
+    {:config (cli/opt ctx "config") :prefix prefix
+     :apply apply? :confirm-db (cli/opt ctx "confirm-db")
+     :page-size (int page-size) :json (boolean (cli/opt ctx "json"))
+     :keep-users (csv (cli/opt ctx "keep-users"))
+     :rules (mapv keyword (csv (cli/opt ctx "rules")))
+     :exclude-rules (mapv keyword (csv (cli/opt ctx "exclude-rules")))
+     :categories (mapv keyword (csv (cli/opt ctx "categories")))
+     :exclude-categories (mapv keyword (csv (cli/opt ctx "exclude-categories")))
+     :tables (mapv keyword (csv (cli/opt ctx "tables")))
+     :exclude-tables (mapv keyword (csv (cli/opt ctx "exclude-tables")))}))
+
+(defn secret-from-env []
+  (let [value (php/getenv "PII_REDACTION_SECRET")]
+    (if (false? value) "" value)))
+
+(defn open-target!
+  "Use the existing literal wp-config reader, but verify the actual database
+   name on the connection. Prefix selection is explicit, never guessed."
+  [path]
+  (let [config (db/parse-wp-config path)
+        pdo (db/connect config)
+        actual (first (first (store/fetch-rows! pdo "SELECT DATABASE()" [])))]
+    (when-not (= (:name config) actual)
+      (throw (new RuntimeException "Connected database does not match config")))
+    {:pdo pdo :name actual}))
+
+(defn confirm-target! [options target]
+  (when (and (:apply options)
+             (or (s/blank? (:name target)) (not= (:confirm-db options) (:name target))))
+    (throw (new InvalidArgumentException "Apply requires --confirm-db matching the connected database"))))
+
+(defn render-report [report json?]
+  (if json?
+    (json/encode report)
+    (str (if (= :apply (:mode report)) "APPLY" "PLAN")
+         " (users/usermeta only): " (:mutations report) " row mutations, "
+         (:affected report) " affected; verified=" (if (:verified report) "yes" "no")
+         "\n"
+         (s/join "\n" (map #(str (:rule %) ": " (:mutations %) " mutations; " (:findings %))
+                            (:rules report))))))
+
+(def failure-message
+  "V2 failed. Details suppressed to protect data. Check configuration, schema, selectors, secret and apply confirmation.")
+
+(defn run-command [ctx]
+  ;; Do not allow PDO messages or verbose framework traces to expose field
+  ;; values (e.g. duplicate-key failures containing a username or email).
+  (try
+    (let [options (options-from ctx)
+          secret (secret-from-env)]
+      (transforms/hmac-token secret :preflight "preflight" 1)
+      (compiler/compile-profile wordpress/user-profile options)
+      (let [target (open-target! (:config options))]
+        (confirm-target! options target)
+        (cli/writeln ctx (render-report
+                          (runner/run! (:pdo target) wordpress/user-profile secret options)
+                          (:json options)))
+        0))
+    (catch Throwable _error
+      (cli/writeln ctx (if (cli/opt ctx "json")
+                        (json/encode {:error failure-message})
+                        failure-message))
+      1)))
+
+(def app
+  (cli/application
+   {:name "pii-users-v2" :version "2.0.0-slice" :default "users"
+    :commands
+    [{:name "users"
+      :doc "Experimental exact-rule users/usermeta redaction for offline clones"
+      :help "Planning is the default. This slice does NOT sanitize a whole database. Set PII_REDACTION_SECRET; apply also requires --confirm-db."
+      :opts [{:name "config" :mode :required :default "wp-config.php" :doc "Literal WordPress database config"}
+             {:name "prefix" :mode :required :doc "Required explicit users/usermeta prefix, e.g. wp_"}
+             {:name "apply" :mode :none :doc "Write atomically and verify before commit"}
+             {:name "dry-run" :mode :none :doc "Explicit no-write preview"}
+             {:name "confirm-db" :mode :required :doc "Required for apply: exact connected database name"}
+             {:name "page-size" :mode :required :default "500" :doc "Rows per page (1..10000)"}
+             {:name "json" :mode :none :doc "Safe machine-readable counts, never raw values"}
+             {:name "keep-users" :mode :required :doc "Comma-separated logins; preserve users and linked usermeta"}
+             {:name "rules" :mode :required :doc "Comma-separated rule IDs to include"}
+             {:name "exclude-rules" :mode :required :doc "Comma-separated rule IDs to exclude"}
+             {:name "categories" :mode :required :doc "Comma-separated identity,names,credentials categories"}
+             {:name "exclude-categories" :mode :required :doc "Comma-separated categories to exclude"}
+             {:name "tables" :mode :required :doc "Logical table scope: users,usermeta"}
+             {:name "exclude-tables" :mode :required :doc "Comma-separated logical tables to exclude"}]
+      :run run-command}]}))

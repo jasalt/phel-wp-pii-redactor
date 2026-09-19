@@ -25,19 +25,29 @@ The command does not write unless `--apply` is present. Plan parameters are
 hidden because they can contain raw PII; `--show-values` is an explicit unsafe
 diagnostic option.
 
+## Experimental V2 users/usermeta slice
+
+An opt-in exact-rule pipeline is available at `src/users.phel`. It adds centralized
+scope/exemptions, keyed transformations, paged reads, guarded updates, and
+transactional verification. **It does not sanitize a whole database.**
+
+See [`V2-USERS.md`](V2-USERS.md) for usage, exact coverage, and limitations.
+MySQL integration remains unverified here; automated database tests use SQLite.
+The legacy `src/main.phel` command remains unchanged.
+
 ## Design
 
 The replacement architecture and migration milestones are documented in
 [`PLAN.md`](PLAN.md). [`REPL-GUIDE.md`](REPL-GUIDE.md) contains the validated
 interactive workflow.
 
-V2 starts with two side-effect-free, REPL-friendly namespaces:
+V2 foundations include two side-effect-free, REPL-friendly namespaces:
 
 - `transforms.phel` — canonicalization and keyed, idempotent value strategies.
 - `profile.phel` — validation and selection for profiles represented as plain
   maps and vectors.
 
-The active CLI still uses the legacy `core.phel`, `db.phel`, and
+The default CLI still uses the legacy `core.phel`, `db.phel`, and
 `policies.phel` pipeline during migration. Its immediate write boundary has
 been hardened: writes require `--apply`, WPML cache payloads are deleted rather
 than rewritten, Stream cleanup uses transactional `DELETE`, foreign-key checks
@@ -49,8 +59,11 @@ Prepared statements are used for execution.
 
 ```bash
 composer test:all   # lint + unit tests
-composer build      # optional: compile a deployable PHP artifact into ignored out/
+composer build      # optional: compile the legacy entry point into ignored out/
 ```
+
+Composer scripts use Composer's PHP executable (`@php`), rather than requiring a
+binary specifically named `php8.4`.
 
 For the complete interactive workflow, see [`REPL-GUIDE.md`](REPL-GUIDE.md).
 A minimal [brepl](https://github.com/licht1stein/brepl/) session is:

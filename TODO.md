@@ -22,7 +22,7 @@ change in `src/pii/redactor/profile.phel`.
 - [x] 4. Add transactional execution of primary-key/old-value-guarded mutations.
   Verify affected counts and post-apply idempotence before commit. Test actual
   database exclusions, rollback, stale writes, and a zero-mutation second apply.
-- [ ] 5. Expose the slice through an opt-in V2 command with safe count-only reports,
+- [x] 5. Expose the slice through an opt-in V2 command with safe count-only reports,
   explicit apply/database confirmation, environment-supplied secret, and uniform
   rule/category/table selectors. Document scope, usage, limitations, and verification.
 
@@ -47,6 +47,12 @@ change in `src/pii/redactor/profile.phel`.
 - Clean committed-tree verification initially exposed the pre-existing profile
   compile error hidden by the local edit. With the independent prerequisite fix,
   an isolated export passes all 246 tests for tasks 1–4 and lint.
+- Task 5: `composer test:all` passes 283 tests with clean lint, including an
+  isolated clean export without the user's local edit. CLI integration
+  covers confirmation, explicit scope, missing secrets, count-only JSON, and
+  suppressed sensitive exceptions even with verbose output. Both entry-point
+  help commands, the missing-secret exit status, `composer build`, compiled
+  legacy help, and `git diff --check` pass. Composer scripts now use `@php`.
 - This environment has PHP 8.5 and PDO SQLite, but no PDO MySQL driver or `php8.4`
   binary. Run checks with `php vendor/bin/phel`; SQLite integration tests cannot
   establish MySQL deployment compatibility. Record that limitation explicitly.

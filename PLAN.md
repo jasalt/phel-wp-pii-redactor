@@ -6,8 +6,12 @@ The existing implementation remains the active CLI while V2 is built in small,
 testable slices. Compatibility with the Python implementation and its output is
 not a requirement.
 
-Current milestone: **M1 — profile data and pure compiler**. M0 safety work and
-pure redaction primitives are complete.
+An opt-in **users/usermeta vertical slice** now spans compilation, schema-aware
+reads, pure mutations, transactional apply, verification, and a separate CLI.
+See `TODO.md` and `V2-USERS.md` for implemented scope and test evidence. M0 safety
+work and pure redaction primitives are complete; full-profile migration and MySQL
+integration validation remain outstanding. The milestone checkboxes below refer
+to the complete V2 migration, not just this slice.
 
 ## Goals
 
@@ -183,7 +187,7 @@ ordinary profile map and have macro-expansion tests.
 - [x] Define the minimal plain-map profile schema.
 - [x] Add validation with useful path-oriented diagnostics.
 - [x] Resolve category, table, and rule selection without database access.
-- [ ] Detect conflicting target ownership without database access.
+- [x] Detect conflicting target ownership without database access.
 - [ ] Define the initial core WordPress profile and exact metadata key maps.
 - [x] Add REPL examples for validating and inspecting a profile.
 

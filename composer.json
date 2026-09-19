@@ -9,10 +9,10 @@
         "phel-lang/phel-lang": "dev-main"
     },
     "scripts": {
-        "build": "php8.4 vendor/bin/phel build",
-        "format": "php8.4 vendor/bin/phel format src tests",
-        "lint": "php8.4 vendor/bin/phel lint src tests",
-        "test": "php8.4 vendor/bin/phel test",
+        "build": "@php vendor/bin/phel build",
+        "format": "@php vendor/bin/phel format src tests",
+        "lint": "@php vendor/bin/phel lint src tests",
+        "test": "@php vendor/bin/phel test",
         "test:all": [
             "@lint",
             "@test"
