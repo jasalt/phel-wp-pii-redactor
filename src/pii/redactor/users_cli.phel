@@ -70,7 +70,7 @@
                             (:rules report))))))
 
 (def failure-message
-  "V2 failed. Details suppressed to protect data. Check configuration, schema, selectors, secret and apply confirmation.")
+  "Redaction failed. Details suppressed to protect data. Check configuration, schema, selectors, secret and apply confirmation.")
 
 (defn run-command [ctx]
   ;; Do not allow PDO messages or verbose framework traces to expose field
@@ -94,7 +94,7 @@
 
 (def app
   (cli/application
-   {:name "pii-users-v2" :version "2.0.0-slice" :default "users"
+   {:name "pii-users" :version "2.0.0" :default "users"
     :commands
     [{:name "users"
       :doc "Experimental exact-rule users/usermeta redaction for offline clones"

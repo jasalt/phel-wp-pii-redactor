@@ -1,10 +1,8 @@
-# V2 architecture: modules and execution flow
+# Architecture: modules and execution flow
 
-This documents the **implemented, opt-in users/usermeta slice** entered through
-`src/users.phel`, not a whole-database sanitizer or the broader future work in
-[`PLAN.md`](PLAN.md), which also documents operation and limitations. The default
-`src/main.phel` still runs the separate legacy
-`main.phel` → `policies.phel` / `core.phel` / `db.phel` pipeline.
+This documents the implemented users/usermeta command entered through
+`src/users.phel`. It is not a whole-database sanitizer; `PLAN.md` documents its
+operation, limitations, and remaining work.
 
 Both diagrams are inline D2 source. A Markdown viewer needs D2 support to render
 them; alternatively, save a block as `diagram.d2` and run
@@ -20,7 +18,7 @@ Pure modules accept and return ordinary Phel data; they do not connect to a
 ```d2
 entry: "src/users.phel\nEntry point: argv → phel.cli → exit code"
 cli: "users_cli.phel\nIntent, secret, preflight, DB confirmation\nSafe text/JSON output; suppress error details"
-config: "db.phel (shared with legacy)\nParse literal wp-config; open PDO connection"
+config: "db.phel\nParse literal wp-config; open PDO connection"
 runner: "runner.phel\nResolve linked exemptions; process bounded pages\nOwn transaction, counters and verification"
 store: "store.phel\nPrefix/schema catalogue; keyset reads\nCapacity checks; guarded SQL; affected-row checks"
 database: "Offline database clone\nInnoDB; SQLite for adapter tests" {
@@ -55,11 +53,11 @@ store -> database: "schema reads; prepared SELECT / UPDATE"
 runner -> cli: "counts only; never row values or SQL parameters"
 ```
 
-`store.phel` is the V2 SQL boundary. The runner uses PDO directly only for
-transaction ownership; the shared legacy config module creates the connection.
-The compiler can describe broader profile kinds, but this executor accepts only
-row and metadata sources. Schema audits and delete ownership in the compiler do
-not imply those operations are implemented in the V2 runner.
+`store.phel` is the SQL boundary. The runner uses PDO directly only for
+transaction ownership; `db.phel` creates the connection. The compiler can
+describe broader profile kinds, but this executor accepts only row and metadata
+sources. Schema audits and delete ownership in the compiler do not imply those
+operations are implemented in the runner.
 
 ## End-to-end call sequence
 
@@ -224,7 +222,7 @@ failure: "Alternative failure path, not after a successful commit" {
   changed key or entity link as well as a changed value. The same kept-user IDs
   exempt linked usermeta rows.
 - **Token strategies:** `redact` calls `replacement` → `token-replacement` →
-  `hmac-token`. Email/URL tokens derive from canonical values. Login and nicename
+  `hmac-token`. Email and URL tokens derive from canonical values. Login tokens
   use `{:namespace :user-login :seed "12"}` to correlate the entity's outputs.
   Reserved token shapes are recognized on later runs.
 - **Empty/already-redacted fields:** findings record skipped/unchanged results,

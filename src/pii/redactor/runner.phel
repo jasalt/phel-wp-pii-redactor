@@ -74,7 +74,7 @@
   ;; Validate even an empty selection or database; never silently use an empty key.
   (transforms/hmac-token secret :preflight "preflight" 1)
   (when (.inTransaction pdo)
-    (throw (new RuntimeException "V2 requires ownership of its transaction")))
+    (throw (new RuntimeException "The redactor requires ownership of its transaction")))
   (let [compiled (compiler/compile-profile input options)
         rules (store/catalogue! pdo compiled (:prefix options))
         apply? (true? (:apply options))]

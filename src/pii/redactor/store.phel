@@ -1,7 +1,7 @@
 (ns pii.redactor.store
   (:require phel.string :as s))
 
-;; The only V2 SQL boundary. No WordPress table names or redaction strategies
+;; The only SQL boundary. No WordPress table names or redaction strategies
 ;; belong here. SQLite is supported for isolated adapter integration tests.
 (defn identifier [value]
   (let [text (if (keyword? value) (name value) value)]
@@ -12,7 +12,7 @@
 (defn driver [pdo]
   (let [value (.getAttribute pdo PDO/ATTR_DRIVER_NAME)]
     (when-not (contains? #{"mysql" "sqlite"} value)
-      (throw (new InvalidArgumentException "V2 supports MySQL and SQLite only")))
+      (throw (new InvalidArgumentException "The redactor supports MySQL and SQLite only")))
     value))
 
 (defn fetch-rows! [pdo sql params]
@@ -92,7 +92,7 @@
                   (case (:kind source)
                     :rows (keys (:fields rule))
                     :metadata [(:key source) (:value source)]
-                    (throw (new InvalidArgumentException "V2 slice supports rows and metadata only"))))))))
+                    (throw (new InvalidArgumentException "Only row and metadata sources are supported"))))))))
 
 (defn validate-schema
   "Fail closed for schema shapes this vertical slice cannot safely execute."
@@ -130,7 +130,7 @@
         schemas (reduce
                  (fn [acc logical]
                    (when-not (keyword? logical)
-                     (throw (new InvalidArgumentException "V2 table names must be logical keywords")))
+                     (throw (new InvalidArgumentException "Table names must be logical keywords")))
                    (assoc acc logical (table-schema! pdo (str prefix (name logical)))))
                  {} tables)]
     (mapv (fn [rule]

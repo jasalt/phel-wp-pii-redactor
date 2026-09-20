@@ -1,28 +1,26 @@
-# PII Redactor V2 Plan
+# PII Redactor Plan
 
 ## Current state
 
-V2 is an **experimental, opt-in users/usermeta slice**, entered through
-`src/users.phel`. The default `src/main.phel` remains the legacy planner and has
-not been switched to V2. V2 is not a whole-database sanitizer: comments, posts,
+The current command is the users/usermeta redactor entered through
+`src/users.phel`. It is not a whole-database sanitizer: comments, posts,
 WooCommerce, WPML, Stream, arbitrary plugin data, heuristic auditing, and
 structured-value codecs are not yet covered.
 
-The completed slice includes plain-data profile compilation, exact rule dispatch,
+The implemented command includes plain-data profile compilation, exact rule dispatch,
 keyed idempotent transforms, prefix-aware catalogue/read support, paged reads,
 old-value-guarded updates, linked user exemptions, transaction ownership,
 post-apply idempotence verification, and a count-only CLI. The latest
-customization work deliberately leaves `user_nicename` out of the V2
-`users/identity` rule: a field is retained by omitting it from the profile; V2
-has no field-level `:keep` selector.
+customization work deliberately leaves `user_nicename` out of the
+`users/identity` rule: a field is retained by omitting it from the profile; there
+is no field-level `:keep` selector.
 
 The current tree has 293 passing automated tests under `composer test:all` and
 clean lint. The latest profile customization retains `user_nicename`; its
 identity and paged-count assertions were updated to cover that behavior. Tests
 use isolated SQLite fixtures. This environment has PDO SQLite but no PDO MySQL
-driver, so
-MySQL catalogue and guard SQL are implemented but have not been live-tested.
-Run the V2 command only against an offline disposable MySQL clone after
+driver, so MySQL catalogue and guard SQL are implemented but have not been
+live-tested. Run the command only against an offline disposable MySQL clone after
 validating it there.
 
 ## Goals
@@ -53,7 +51,7 @@ validating it there.
    unless a reviewed profile explicitly opts into mutation.
 7. **Backend-neutral mutations.** SQL is generated only at the PDO boundary.
 
-## Completed V2 users/usermeta slice
+## Current users/usermeta coverage
 
 ### Run it safely
 
@@ -118,8 +116,8 @@ name must exist in the profile.
 ```
 
 `--keep-users` resolves current `user_login` values case-insensitively before
-writing. It preserves every selected V2 field on the matched users and their
-linked usermeta, but does not extend to comments or plugin data. For multisite,
+writing. It preserves every selected field on the matched users and their linked
+usermeta, but does not extend to comments or plugin data. For multisite,
 supply the intended shared user-table prefix; network/site prefix discovery is
 not implemented.
 
@@ -144,20 +142,20 @@ Values already matching a reserved output format are treated as redacted.
 
 ### Delivered implementation and validation
 
-- [x] **M0 — safety/foundation:** plan is the legacy CLI default; writes require
+- [x] **M0 — safety/foundation:** planning is the default; writes require
       `--apply`; preview parameters are hidden; Stream uses transactional
       `DELETE`; WPML caches are deleted safely; pure keyed idempotent transforms
       and a documented nREPL workflow exist; Python parity is no longer required.
 - [x] **M1 — profiles/compiler:** minimal plain-map schema, path-oriented
       diagnostics, selector resolution, overlap detection, and REPL examples.
-- [x] **M2 — catalogue/readers for this slice:** prefix-aware SQLite/MySQL
+- [x] **M2 — catalogue/readers:** prefix-aware SQLite/MySQL
       catalogue support, required-column/type/output-capacity checks, keyset
       readers, optional/schema failure handling, and identifier safety tests.
-- [x] **M3 — mutation engine for this slice:** normalized row-to-mutation and
+- [x] **M3 — mutation engine:** normalized row-to-mutation and
       value-free findings, linked keep-user exemptions, guarded prepared updates,
       transactional execution, affected-count checks, rollback tests, and
       post-apply verification.
-- [x] **M4 — V2 CLI/reporting for this slice:** uniform selectors, safe text/JSON
+- [x] **M4 — CLI/reporting:** uniform selectors, safe text/JSON
       reports, explicit apply/database confirmation, environment secret, and
       separate planned versus affected counts.
 
@@ -169,7 +167,7 @@ scoped exclusions, credential cleanup, capacity and schema rejection, guarded
 writes, late failures/rollback, failed verification, repeat-run idempotence, and
 safe CLI errors. It does not certify a live MySQL deployment.
 
-## Remaining migration plan
+## Remaining work
 
 ### M1 follow-up — expand reviewed profile data
 
@@ -200,7 +198,7 @@ safe CLI errors. It does not certify a live MySQL deployment.
       default and require an explicit draft/private-content policy.
 - [ ] Add exact WooCommerce billing/shipping metadata and separate HPOS module.
 - [ ] Add WXR import-slug handling with opaque-placeholder fallback.
-- [ ] Add WPML translator-cache and Stream audit deletion to the V2 profile.
+- [ ] Add WPML translator-cache and Stream audit deletion to the profile.
 - [ ] Add report-only heuristic auditing and explicit structured-value codecs;
       never blindly replace text inside PHP serialization.
 
@@ -212,13 +210,13 @@ safe CLI errors. It does not certify a live MySQL deployment.
       non-InnoDB tables, and independent dump scans.
 - [ ] Prove normal reports never reveal raw PII and exact metadata fixtures retain
       no configured PII after apply.
-- [ ] Switch the default entry point to V2 and remove the legacy planner only
-      after broader coverage and deployment validation.
+- [ ] Expand the entry point only after broader coverage and deployment
+      validation.
 
 ## Acceptance criteria
 
-V2 is ready to replace the current implementation only when all profile rules
-are inspectable plain data; current use cases are represented without
+The redactor is ready for broader production use only when all profile rules are
+inspectable plain data; required use cases are represented without
 policy-order dependencies; a second application is a no-op; absent optional
 plugins are non-fatal; planning cannot write or reveal raw values by default;
 transaction failure leaves touched transactional tables unchanged; configured
