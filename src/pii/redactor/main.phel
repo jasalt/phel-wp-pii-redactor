@@ -119,11 +119,20 @@
 ;; Execute/preview phase
 ;; ---------------------------------------------------------------------------
 
-(defn- log-summary! [plan]
-  (info! "=== Summary ===")
+(defn- log-planned-summary! [plan]
+  (info! "=== Planned operations by table ===")
   (let [by-table (core/changes-by-table plan)]
+    (if (empty? by-table)
+      (info! "  No operations planned.")
+      (doseq [table :in (sort (keys by-table))]
+        (info! "  %-40s %d operation(s)" table (get by-table table))))))
+
+(defn- log-affected-summary! [by-table]
+  (info! "=== Affected rows by table ===")
+  (if (empty? by-table)
+    (info! "  No rows changed; the database already satisfies the redaction plan.")
     (doseq [table :in (sort (keys by-table))]
-      (info! "  %-40s %d change(s)" table (get by-table table)))))
+      (info! "  %-40s %d row(s)" table (get by-table table)))))
 
 (defn query-preview
   "Render a planned statement without exposing parameter values by default."
@@ -134,23 +143,37 @@
             (:sql query)
             (count (:params query)))))
 
-(defn finish-plan! [pdo options plan]
-  (let [queries (:queries plan)]
+(defn finish-plan!
+  "Preview or execute a plan and return execution statistics. Planned
+   operations describe policy intent; affected rows describe actual writes."
+  [pdo options plan]
+  (let [queries    (:queries plan)
+        statements (count queries)
+        operations (count (:changes plan))]
     (if (:dry-run options)
       (do
-        (info! "Would execute %d SQL statement(s)" (count queries))
+        (info! "Would execute %d SQL statement(s)" statements)
         (doseq [query :in (take 25 queries)]
           (info! "  %s" (query-preview pdo options query)))
-        (when (> (count queries) 25)
-          (info! "  ... and %d more" (- (count queries) 25))))
+        (when (> statements 25)
+          (info! "  ... and %d more" (- statements 25)))
+        (log-planned-summary! plan)
+        {:mode :plan :statements statements :operations operations})
       (if (empty? queries)
-        (info! "Nothing to do.")
+        (do
+          (info! "Nothing to do.")
+          {:mode :apply :statements 0 :operations operations
+           :affected 0 :by-table {}})
         (do
           (info! "Executing %d SQL statement(s) inside a transaction..."
-                 (count queries))
-          (let [affected (db/execute-queries! pdo queries)]
-            (info! "Transaction complete. Total affected rows: %d" affected))
-          (log-summary! plan))))))
+                 statements)
+          (let [report (db/execute-queries-report! pdo queries)]
+            (info! "Transaction complete. Total affected rows: %d"
+                   (:affected report))
+            (log-affected-summary! (:by-table report))
+            (merge {:mode :apply :statements statements
+                    :operations operations}
+                   report)))))))
 
 (defn log-locations! [tables]
   (doseq [table-spec :in tables
@@ -200,16 +223,20 @@
                               "(skipped — public content)")
                          public-email-count)))
               (info! "Replacement map: %s" (core/replacement-stats replacements))
-              (let [plan (build-and-report-plan
-                          (assoc ctx :replacements replacements))]
-                (finish-plan! pdo options plan)
+              (let [plan      (build-and-report-plan
+                               (assoc ctx :replacements replacements))
+                    execution (finish-plan! pdo options plan)]
                 (when-not (empty? (:whitelist-users options))
                   (if (:show-values options)
                     (info! "Whitelisted users (skipped): %s"
                            (s/join ", " (sort (:whitelist-users options))))
                     (info! "Whitelisted users skipped: %d value(s) hidden"
                            (count (:whitelist-users options)))))
-                (info! "Redaction complete. Changes: %d" (count (:changes plan)))
+                (if (:dry-run options)
+                  (info! "Plan complete. Planned operations: %d"
+                         (:operations execution))
+                  (info! "Redaction complete. Affected rows: %d"
+                         (:affected execution)))
                 0))))))))
 
 (defn- run-command [ctx]

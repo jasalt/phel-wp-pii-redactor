@@ -81,6 +81,7 @@
            (:sql (first queries))))
     (is (= ["anon-ff8d9819fc0e@localhost.localdomain" "alice@example.com"]
            (:params (first queries))))
+    (is (= ["wp_comments" "wp_comments"] (mapv :table queries)))
     (is (= 2 (count (:changes plan))))))
 
 (deftest table-filter-and-name-option-shape-the-plan
@@ -158,7 +159,9 @@
           {:id 2 :value "legacy-user"}])]
     (is (= 2 (count (:queries wxr-plan))))
     (is (= 2 (count (:changes wxr-plan))))
-    (is (= ["[REDACTED]" 2] (:params (second (:queries wxr-plan)))))))
+    (is (= ["[REDACTED]" 2] (:params (second (:queries wxr-plan)))))
+    (is (= ["wp_postmeta" "wp_postmeta"]
+           (mapv :table (:queries wxr-plan))))))
 
 (deftest generated-registry-values-are-idempotent
   (let [[emails email-value]

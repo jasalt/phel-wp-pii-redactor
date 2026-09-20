@@ -194,16 +194,33 @@
     (.execute statement (to-array (:params query)))
     (int (.rowCount statement))))
 
-(defn execute-queries! [pdo queries]
+(defn execute-queries-report! [pdo queries]
+  "Execute a plan atomically and report actual changed rows, including totals
+   by table when queries carry table metadata."
   ;; Keep foreign-key enforcement enabled. The plan must preserve relational
   ;; integrity, and every operation in the active planner is now transactional
   ;; DML rather than implicit-commit DDL.
   (.beginTransaction pdo)
   (try
-    (let [affected (reduce #(+ %1 (execute-query! pdo %2)) 0 queries)]
+    (let [report
+          (reduce
+           (fn [current query]
+             (let [affected (execute-query! pdo query)
+                   table    (:table query)
+                   counted  (update current :affected + affected)]
+               (if (and (pos? affected) (some? table))
+                 (assoc-in counted [:by-table table]
+                           (+ affected (get-in counted [:by-table table] 0)))
+                 counted)))
+           {:affected 0 :by-table {}}
+           queries)]
       (.commit pdo)
-      affected)
+      report)
     (catch Throwable error
       (when (.inTransaction pdo)
         (.rollBack pdo))
       (throw error))))
+
+(defn execute-queries! [pdo queries]
+  "Compatibility wrapper returning only the total number of affected rows."
+  (:affected (execute-queries-report! pdo queries)))

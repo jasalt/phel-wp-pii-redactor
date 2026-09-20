@@ -263,14 +263,19 @@
    :queries []
    :changes []})
 
-(defn add-query [plan sql params]
-  (update plan :queries conj {:sql sql :params params}))
+(defn add-query
+  "Add executable SQL to a plan. An optional table name lets the executor
+   attribute affected rows without parsing SQL text."
+  [plan sql params & [table]]
+  (update plan :queries conj
+          (cond-> {:sql sql :params params}
+                  (some? table) (assoc :table table))))
 
 (defn add-change [plan change]
   (update plan :changes conj change))
 
 (defn add-operation [plan sql params change]
-  (add-change (add-query plan sql params) change))
+  (add-change (add-query plan sql params (:table change)) change))
 
 (defn add-changes [plan changes]
   (reduce add-change plan changes))
@@ -620,7 +625,8 @@
            (add-query
             (:plan redacted)
             "UPDATE wp_postmeta SET meta_value=? WHERE meta_id=?"
-            [(:value redacted) meta-id])))))
+            [(:value redacted) meta-id]
+            "wp_postmeta")))))
    plan
    rows))
 
