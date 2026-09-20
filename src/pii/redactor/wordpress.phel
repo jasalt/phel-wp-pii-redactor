@@ -16,7 +16,7 @@
    [{:id :users/identity :category :identity :source users-source
      :fields {:user_email {:kind :email :strategy :token}
               :user_login {:kind :login :strategy :token}
-              :user_nicename {:kind :login :strategy :token}
+              ;; :user_nicename {:kind :login :strategy :token}
               :user_url {:kind :url :strategy :token}}}
     {:id :users/names :category :names :source users-source
      :fields {:display_name {:kind :name :strategy [:constant "Anonymous"]}}}
