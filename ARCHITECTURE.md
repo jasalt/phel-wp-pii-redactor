@@ -1,9 +1,9 @@
 # V2 architecture: modules and execution flow
 
 This documents the **implemented, opt-in users/usermeta slice** entered through
-`src/users.phel`, not a whole-database sanitizer or the future design in
-[`PLAN.md`](PLAN.md). See [`V2-USERS.md`](V2-USERS.md) for operation and limitations.
-The default `src/main.phel` still runs the separate legacy
+`src/users.phel`, not a whole-database sanitizer or the broader future work in
+[`PLAN.md`](PLAN.md), which also documents operation and limitations. The default
+`src/main.phel` still runs the separate legacy
 `main.phel` → `policies.phel` / `core.phel` / `db.phel` pipeline.
 
 Both diagrams are inline D2 source. A Markdown viewer needs D2 support to render
@@ -248,4 +248,5 @@ failure: "Alternative failure path, not after a successful commit" {
   fields, while `exempt` counts skipped rows per rule.
 - MySQL SQL generation is implemented, but local integration coverage uses SQLite.
   Transaction guarantees do not cover external writers or trigger side effects on
-  nontransactional tables. See `V2-USERS.md` for the full limitations.
+  nontransactional tables. `PLAN.md` records the full limitations and remaining
+  validation work.

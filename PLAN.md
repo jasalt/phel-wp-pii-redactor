@@ -1,17 +1,29 @@
 # PII Redactor V2 Plan
 
-## Status
+## Current state
 
-The existing implementation remains the active CLI while V2 is built in small,
-testable slices. Compatibility with the Python implementation and its output is
-not a requirement.
+V2 is an **experimental, opt-in users/usermeta slice**, entered through
+`src/users.phel`. The default `src/main.phel` remains the legacy planner and has
+not been switched to V2. V2 is not a whole-database sanitizer: comments, posts,
+WooCommerce, WPML, Stream, arbitrary plugin data, heuristic auditing, and
+structured-value codecs are not yet covered.
 
-An opt-in **users/usermeta vertical slice** now spans compilation, schema-aware
-reads, pure mutations, transactional apply, verification, and a separate CLI.
-See `TODO.md` and `V2-USERS.md` for implemented scope and test evidence. M0 safety
-work and pure redaction primitives are complete; full-profile migration and MySQL
-integration validation remain outstanding. The milestone checkboxes below refer
-to the complete V2 migration, not just this slice.
+The completed slice includes plain-data profile compilation, exact rule dispatch,
+keyed idempotent transforms, prefix-aware catalogue/read support, paged reads,
+old-value-guarded updates, linked user exemptions, transaction ownership,
+post-apply idempotence verification, and a count-only CLI. The latest
+customization work deliberately leaves `user_nicename` out of the V2
+`users/identity` rule: a field is retained by omitting it from the profile; V2
+has no field-level `:keep` selector.
+
+The current tree has 293 passing automated tests under `composer test:all` and
+clean lint. The latest profile customization retains `user_nicename`; its
+identity and paged-count assertions were updated to cover that behavior. Tests
+use isolated SQLite fixtures. This environment has PDO SQLite but no PDO MySQL
+driver, so
+MySQL catalogue and guard SQL are implemented but have not been live-tested.
+Run the V2 command only against an offline disposable MySQL clone after
+validating it there.
 
 ## Goals
 
@@ -20,7 +32,7 @@ to the complete V2 migration, not just this slice.
 - Keep transformations deterministic within and, when desired, across runs.
 - Make policy scope, exclusions, and optional plugin support explicit.
 - Plan and report without exposing raw PII by default.
-- Apply mutations atomically when the storage engines support transactions.
+- Apply mutations atomically when storage engines support transactions.
 - Keep the code easy to load, inspect, redefine, and exercise from a Phel REPL.
 
 ## Design constraints
@@ -28,9 +40,9 @@ to the complete V2 migration, not just this slice.
 1. **Plain data and functions first.** Profiles are ordinary Phel maps and
    vectors. Constructors or macros are introduced only when they remove proven
    repetition without hiding the resulting data.
-2. **Small public pure functions.** Value transformation and profile
-   compilation must be usable without PDO, CLI contexts, or global state.
-3. **No arbitrary SQL DSL.** Generalize the stable operations—reading rows,
+2. **Small public pure functions.** Value transformation and profile compilation
+   must be usable without PDO, CLI contexts, or global state.
+3. **No arbitrary SQL DSL.** Generalize stable operations—reading rows,
    transforming fields, dispatching metadata keys, deleting disposable rows,
    and auditing schema matches—not SQL itself.
 4. **No order-dependent replacement registry.** Keyed deterministic transforms
@@ -41,201 +53,176 @@ to the complete V2 migration, not just this slice.
    unless a reviewed profile explicitly opts into mutation.
 7. **Backend-neutral mutations.** SQL is generated only at the PDO boundary.
 
-## Target model
+## Completed V2 users/usermeta slice
 
-A profile is a map containing entities and rules. A rule has a stable `:id`, a
-source, and an action. The first implementation needs only four source/action
-shapes:
+### Run it safely
 
-- row fields in a table;
-- metadata key/value rows;
-- deletion of matching disposable rows;
-- report-only schema matches.
+Requirements are PHP 8.4+, Composer dependencies, and PDO MySQL for WordPress.
+Supply a stable secret through the environment, not a command-line argument:
 
-Example normalized row rule:
+```bash
+export PII_REDACTION_SECRET="$(php -r 'echo bin2hex(random_bytes(32));')"
 
-```phel
-{:id :users/profile
- :category :identity
- :source {:kind :rows
-          :table :users
-          :pk [:ID]
-          :entity [:user :ID]}
- :fields {:user_email {:kind :email :strategy :token}
-          :user_login {:kind :login :strategy :token}
-          :display_name {:kind :name
-                         :strategy [:constant "Anonymous"]}}}
+# Preview is the default and does not write. The prefix is deliberately explicit.
+php vendor/bin/phel run src/users.phel \
+  --config /path/to/clone/wp-config.php --prefix wp_ --json
+
+# Apply recomputes a fresh plan inside a transaction.
+# --confirm-db must equal SELECT DATABASE().
+php vendor/bin/phel run src/users.phel \
+  --config /path/to/clone/wp-config.php --prefix wp_ \
+  --apply --confirm-db wordpress_clone
+
+unset PII_REDACTION_SECRET
 ```
 
-Value kind and replacement strategy are separate. For example, an email may use
-`:token`, `:clear`, or `[:constant value]` depending on the profile and schema.
+`--dry-run` explicitly requests the default preview; it cannot be combined with
+`--apply`. Missing secrets, unknown selectors, unknown kept users, and
+unsupported schema fail closed. Apply never executes SQL saved by a preview.
+The shared config reader accepts literal `DB_*` definitions only; it does not
+evaluate PHP expressions or environment-based WordPress configuration. Its host
+parser does not yet provide general socket/IPv6 DSN parsing.
 
-Sources normalize database rows to data like:
+### Exact profile coverage
 
-```phel
-{:locator {:table "site_users" :pk {:ID 12}}
- :values {:user_email "person@example.org"}
- :entity {:type :user :id 12}}
+| Rule | Category | Targets and behavior |
+| --- | --- | --- |
+| `users/identity` | `identity` | Tokenizes email, login, and HTTP(S) URL. Login tokens use the entity ID; `user_nicename` is retained. |
+| `users/names` | `names` | Sets `display_name` to `Anonymous`. |
+| `users/credentials` | `credentials` | Sets password hash to `*` and clears activation/reset key. |
+| `usermeta/names` | `names` | Sets `first_name`, `last_name`, and `nickname` to `Anonymous`. |
+| `usermeta/profile` | `identity` | Clears biography/description and messaging keys; tokenizes `user_url`. |
+| `usermeta/credentials` | `credentials` | Clears `session_tokens` and `_application_passwords` wholesale, without editing serialized contents. |
+
+There is no automatic system-email exemption. Empty values remain empty;
+non-empty malformed targeted emails or URLs stop the run instead of being
+silently retained. Roles, capabilities, unrelated metadata, IDs, and
+`user_nicename` are preserved. Credentials are disabled unless the account is
+explicitly kept.
+
+### Scope, exemptions, and guarantees
+
+Selectors are comma-separated names without leading colons. Include selectors
+intersect; exclusions subtract; an empty include list means all. Every supplied
+name must exist in the profile.
+
+```text
+--tables users,usermeta
+--categories identity,names
+--exclude-categories credentials
+--rules users/identity,usermeta/profile
+--exclude-rules usermeta/profile
+--exclude-tables usermeta
+--keep-users local-admin,another-account
+--page-size 250
 ```
 
-Pure transformation produces findings and backend-neutral mutations. Reports
-receive fingerprints and counts; raw before/after values remain internal.
+`--keep-users` resolves current `user_login` values case-insensitively before
+writing. It preserves every selected V2 field on the matched users and their
+linked usermeta, but does not extend to comments or plugin data. For multisite,
+supply the intended shared user-table prefix; network/site prefix discovery is
+not implemented.
 
-## Execution pipeline
+The runner reports only counts: no raw before/after values, usernames, secrets,
+SQL parameters, or database exception details are emitted by normal text or JSON
+reports. `mutations` counts row updates per rule; `affected` counts executed
+updates; findings count field results except `exempt`, which counts skipped rows
+per rule. Preview reports `affected=0` and `verified=false`.
 
-1. **Catalogue**
-   - Resolve logical WordPress tables from the configured prefix and site scope.
-   - Read primary keys, column types/lengths, unique indexes, generated columns,
-     and storage engines.
-   - Detect optional plugin tables and columns.
+Each update is guarded by the primary key and the exact old value; metadata
+updates also guard its key and entity reference. MySQL text guards use binary
+comparison. Apply requires InnoDB (SQLite is accepted for tests), keeps
+foreign-key checks enabled, verifies affected counts, then re-reads inside the
+same transaction and requires zero further selected-rule mutations before
+commit. This proves rule idempotence, not an independent residual-PII audit.
 
-2. **Compile profile**
-   - Resolve logical names against the catalogue.
-   - Apply category, rule, table, and entity exclusions centrally.
-   - Reject conflicting target ownership and incompatible output shapes.
-   - Produce diagnostics for missing optional schema; fail for required schema.
+Use an offline clone with no concurrent writers or schema changes. A transaction
+can still be large despite paged application, and triggers affecting other or
+nontransactional tables are outside its rollback guarantee. HMAC tokens are
+pseudonyms rather than proof of irreversible anonymization; protect the secret.
+Values already matching a reserved output format are treated as redacted.
 
-3. **Read and transform**
-   - Page rows by primary key.
-   - Canonicalize values and generate keyed HMAC tokens without a registry pass.
-   - Require every transform to be idempotent.
-   - Emit distinct findings and row mutations.
+### Delivered implementation and validation
 
-4. **Plan or apply**
-   - `plan` is the safe default and masks values.
-   - `apply` is explicit and recomputes a fresh plan inside its transaction.
-   - Updates use primary keys plus old-value predicates for stale-write detection.
-   - Disposable data uses transactional `DELETE`, never `TRUNCATE`.
-   - Foreign-key checks remain enabled.
+- [x] **M0 — safety/foundation:** plan is the legacy CLI default; writes require
+      `--apply`; preview parameters are hidden; Stream uses transactional
+      `DELETE`; WPML caches are deleted safely; pure keyed idempotent transforms
+      and a documented nREPL workflow exist; Python parity is no longer required.
+- [x] **M1 — profiles/compiler:** minimal plain-map schema, path-oriented
+      diagnostics, selector resolution, overlap detection, and REPL examples.
+- [x] **M2 — catalogue/readers for this slice:** prefix-aware SQLite/MySQL
+      catalogue support, required-column/type/output-capacity checks, keyset
+      readers, optional/schema failure handling, and identifier safety tests.
+- [x] **M3 — mutation engine for this slice:** normalized row-to-mutation and
+      value-free findings, linked keep-user exemptions, guarded prepared updates,
+      transactional execution, affected-count checks, rollback tests, and
+      post-apply verification.
+- [x] **M4 — V2 CLI/reporting for this slice:** uniform selectors, safe text/JSON
+      reports, explicit apply/database confirmation, environment secret, and
+      separate planned versus affected counts.
 
-5. **Verify**
-   - Compare expected and affected row counts.
-   - Run a post-apply audit.
-   - Report findings, mutations, affected rows, exemptions, and unsupported data
-     separately.
+The automated progression for the completed work was: 140 baseline tests; 152
+after compiler work; 184 after exact profile/engine work; 204 after catalogue and
+reader work; 246 after transactional execution; and 283 after the CLI, including
+an isolated clean-export check. Coverage includes preview safety, custom prefixes,
+scoped exclusions, credential cleanup, capacity and schema rejection, guarded
+writes, late failures/rollback, failed verification, repeat-run idempotence, and
+safe CLI errors. It does not certify a live MySQL deployment.
 
-## WordPress profile coverage
+## Remaining migration plan
 
-### Core
+### M1 follow-up — expand reviewed profile data
 
-- `users`: email, login, nicename, display name, password, activation key.
-- `usermeta`: names, biographies, URLs, messaging identifiers, sessions and
-  other credentials.
-- `comments`: author name, email, URL, and IP, with explicit public-content
-  semantics rather than inferred matching against known users.
-- `posts`: report public content by default; allow an explicit policy for
-  drafts/private content.
+- [ ] Define the remaining initial core WordPress profile and exact metadata-key
+      maps beyond the delivered users/usermeta rules.
+- [ ] Establish explicit public-content semantics rather than inferring comments
+      from known users.
 
-### Metadata and plugins
-
-- WooCommerce billing/shipping metadata maps every exact key to a value kind;
-  names, addresses, and phones must not be treated as email-only fields.
-- WXR import slugs use an email transform with an opaque-placeholder fallback.
-- WPML translator cache rows are deleted rather than edited as serialized text.
-- Stream audit rows are transactionally deleted when the optional table exists.
-- Newer WooCommerce HPOS tables are a separate composable profile module.
-
-Structured values are decoded and re-encoded with an explicit codec. Disposable
-caches should be deleted. Blind replacement inside PHP serialization is never
-allowed.
-
-## REPL-driven development
-
-Every pure namespace should be useful independently:
-
-```phel
-(require 'pii.redactor.transforms)
-
-(pii.redactor.transforms/redact
- "development-secret"
- :email
- :token
- "Person@Example.org")
-```
-
-Development rules:
-
-- Keep namespace loading free of database connections and other side effects.
-- Prefer named public functions over deeply nested anonymous callbacks.
-- Return inspectable maps rather than opaque objects.
-- Keep I/O at narrow functions suffixed with `!` where practical.
-- Add examples to docstrings for key public functions.
-- Test pure functions directly; use database fixtures only for the adapter.
-- Use `with-redefs` at the REPL rather than service containers or dependency
-  injection frameworks.
-
-A `defprofile` macro is deliberately deferred. If introduced, it may only add
-name/source metadata and invoke profile validation; its expansion must remain an
-ordinary profile map and have macro-expansion tests.
-
-## Implementation milestones
-
-### M0 — immediate safety and foundation
-
-- [x] Architecture review and replacement plan.
-- [x] Make plan/preview the CLI default and require `--apply` for writes.
-- [x] Hide query parameter values unless explicitly requested.
-- [x] Replace Stream `TRUNCATE` with transactional `DELETE`.
-- [x] Delete WPML cache rows safely and honor `--redact-options`.
-- [x] Add pure keyed, idempotent transform primitives and tests.
-- [x] Remove Python parity from the required test suite.
-- [x] Validate the edit/reload/evaluate workflow against a live nREPL and
-      document it in `REPL-GUIDE.md`.
-
-### M1 — profile data and pure compiler
-
-- [x] Define the minimal plain-map profile schema.
-- [x] Add validation with useful path-oriented diagnostics.
-- [x] Resolve category, table, and rule selection without database access.
-- [x] Detect conflicting target ownership without database access.
-- [ ] Define the initial core WordPress profile and exact metadata key maps.
-- [x] Add REPL examples for validating and inspecting a profile.
-
-### M2 — catalogue and readers
+### M2 follow-up — catalogue and readers
 
 - [ ] Parse or override `$table_prefix`; support ports, sockets, and IPv6 hosts.
-- [ ] Build a logical-to-physical table catalogue.
-- [ ] Add optional-table and schema compatibility checks.
-- [ ] Implement paged row, metadata, and delete-target readers.
+- [ ] Complete logical-to-physical table catalogue support for multisite and
+      optional plugin tables.
+- [ ] Add readers for comments, posts, delete targets, and reviewed structured
+      values/codecs.
 
-### M3 — mutation engine
+### M3 follow-up — mutation engine
 
-- [ ] Transform normalized rows into findings and mutations.
-- [ ] Add entity-wide keep rules for users and linked rows.
-- [ ] Validate lengths and generated-value uniqueness.
-- [ ] Compile prepared CAS updates and transactional deletes.
-- [ ] Refuse atomic mode for touched nontransactional tables.
+- [ ] Add entity-wide keep rules across users, usermeta, comments, and future
+      linked data.
+- [ ] Support transactional deletes for reviewed disposable caches/logs.
+- [ ] Validate generated-value uniqueness and all remaining output shapes.
+- [ ] Refuse atomic mode whenever any touched table is nontransactional.
 
-### M4 — CLI and reporting
+### M4 follow-up — coverage and reports
 
-- [ ] Replace negative feature flags with uniform include/exclude selectors.
-- [ ] Add safe text and JSON plan reports.
-- [ ] Require an explicit apply confirmation tied to the database name.
-- [ ] Report planned mutations separately from affected rows.
-- [ ] Add post-apply verification.
+- [ ] Add comments with explicit public-content policy; keep posts report-only by
+      default and require an explicit draft/private-content policy.
+- [ ] Add exact WooCommerce billing/shipping metadata and separate HPOS module.
+- [ ] Add WXR import-slug handling with opaque-placeholder fallback.
+- [ ] Add WPML translator-cache and Stream audit deletion to the V2 profile.
+- [ ] Add report-only heuristic auditing and explicit structured-value codecs;
+      never blindly replace text inside PHP serialization.
 
 ### M5 — validation and cutover
 
-- [ ] Apply twice; the second run must plan zero mutations.
-- [ ] Failure-injection test proves complete rollback.
-- [ ] Test custom prefixes, multisite, missing plugins, and non-InnoDB tables.
-- [ ] Test exclusion scope across users, usermeta, and comments.
-- [ ] Verify serialized caches are deleted or codec-round-tripped correctly.
-- [ ] Prove normal reports never reveal raw PII.
-- [ ] Run the independent dump scanner against representative fixtures.
-- [ ] Switch the entry point to V2 and remove the legacy planner.
+- [ ] Apply twice and require a zero-mutation second plan for every profile.
+- [ ] Prove rollback with failure injection for all touched transactional tables.
+- [ ] Test disposable MySQL clones, custom prefixes, multisite, missing plugins,
+      non-InnoDB tables, and independent dump scans.
+- [ ] Prove normal reports never reveal raw PII and exact metadata fixtures retain
+      no configured PII after apply.
+- [ ] Switch the default entry point to V2 and remove the legacy planner only
+      after broader coverage and deployment validation.
 
 ## Acceptance criteria
 
-V2 is ready to replace the current implementation when:
-
-- all profile rules are inspectable as plain data;
-- all current use cases are represented without policy-order dependencies;
-- a second application is a no-op;
-- optional plugin absence is non-fatal;
-- dry planning cannot modify the database or reveal raw values by default;
-- transaction failure leaves all touched transactional tables unchanged;
-- exact metadata fixtures contain no residual configured PII after apply; and
-- the implementation remains understandable through direct REPL calls without
-  requiring a macro-expansion or framework lifecycle to follow normal control
-  flow.
+V2 is ready to replace the current implementation only when all profile rules
+are inspectable plain data; current use cases are represented without
+policy-order dependencies; a second application is a no-op; absent optional
+plugins are non-fatal; planning cannot write or reveal raw values by default;
+transaction failure leaves touched transactional tables unchanged; configured
+metadata fixtures contain no residual PII after apply; an independent dump scan
+has been run against representative data; and ordinary control flow remains
+understandable through direct REPL calls without macro expansion or a framework
+lifecycle.

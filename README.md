@@ -75,9 +75,10 @@ An opt-in exact-rule pipeline is available at `src/users.phel`. It adds centrali
 scope/exemptions, keyed transformations, paged reads, guarded updates, and
 transactional verification. **It does not sanitize a whole database.**
 
-See [`V2-USERS.md`](V2-USERS.md) for usage, exact coverage, and limitations,
-and [`ARCHITECTURE.md`](ARCHITECTURE.md) for inline D2 module and execution-flow
-diagrams. MySQL integration remains unverified here; automated database tests use SQLite.
+See [`PLAN.md`](PLAN.md) for usage, exact coverage, limitations, delivered
+work, and the remaining migration plan; [`ARCHITECTURE.md`](ARCHITECTURE.md)
+contains inline D2 module and execution-flow diagrams. MySQL integration remains
+unverified here; automated database tests use SQLite.
 The legacy `src/main.phel` command remains unchanged.
 
 ## Design
