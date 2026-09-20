@@ -1,8 +1,8 @@
 # WordPress PII Redactor
 
-Scrubs personally identifiable information from WordPress database for development purposes.
+CLI tool redacting personally identifiable information (PII) from WordPress instance for development and testing purposes. Helps to avoid exposing PII to cloud LLM inference powered AI agents and other third parties.
 
-Requires per project modifications to take into account data stored by plugins, but attempts to provide a simplified (WIP) API for facilitating that.
+Requires per project modifications to take into account data stored by plugins, but attempts to provide a simplified (WIP) API for facilitating that. Ensure that the database is free of PII manually and/or with help of local LLMs after use and adjust as needed.
 
 Written in [Phel](https://github.com/phel-lang/phel-lang/), a Clojure dialect.
 
