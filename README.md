@@ -25,7 +25,7 @@ unset PII_REDACTION_SECRET
 ```
 
 If `phel` is on your `PATH`, `phel run src/users.phel ...` is equivalent. Phel
-0.49 requires PHP 8.4; use `php8.4 vendor/bin/phel` when the default `php` is
+0.52 requires PHP 8.4; use `php8.4 vendor/bin/phel` when the default `php` is
 older.
 
 The command does not write unless `--apply` is present. It requires an explicit

@@ -1,8 +1,8 @@
 (ns tests.pii.redactor.fixtures)
 
 (defn database []
-  (doto (new PDO "sqlite::memory:")
-    (.setAttribute PDO/ATTR_ERRMODE PDO/ERRMODE_EXCEPTION)
+  (doto (new \PDO "sqlite::memory:")
+    (.setAttribute \PDO/ATTR_ERRMODE \PDO/ERRMODE_EXCEPTION)
     (.exec "PRAGMA foreign_keys=ON")
     (.exec "CREATE TABLE site_users (
                 ID INTEGER PRIMARY KEY, user_login VARCHAR(60) UNIQUE,

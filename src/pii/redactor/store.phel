@@ -10,15 +10,15 @@
     (str "`" text "`")))
 
 (defn driver [pdo]
-  (let [value (.getAttribute pdo PDO/ATTR_DRIVER_NAME)]
+  (let [value (.getAttribute pdo \PDO/ATTR_DRIVER_NAME)]
     (when-not (contains? #{"mysql" "sqlite"} value)
       (throw (new InvalidArgumentException "The redactor supports MySQL and SQLite only")))
     value))
 
 (defn fetch-rows! [pdo sql params]
   (let [statement (.prepare pdo sql)]
-    (.execute statement (to-php-array params))
-    (mapv vec (.fetchAll statement PDO/FETCH_NUM))))
+    (.execute statement (to-array params))
+    (mapv vec (.fetchAll statement \PDO/FETCH_NUM))))
 
 (defn- column-type [native]
   (let [type (s/lower-case native)]
@@ -201,7 +201,7 @@
     (throw (new RuntimeException "Mutation execution requires an active transaction")))
   (let [query (mutation-query (driver pdo) mutation)
         statement (.prepare pdo (:sql query))]
-    (.execute statement (to-php-array (:params query)))
+    (.execute statement (to-array (:params query)))
     (when-not (= 1 (.rowCount statement))
       (throw (new RuntimeException "Stale mutation: expected exactly one affected row")))
     1))

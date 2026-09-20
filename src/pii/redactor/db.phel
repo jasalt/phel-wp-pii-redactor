@@ -49,19 +49,19 @@
                         (if (contains? parts :port) (str ";port=" (get parts :port)) "")
                         ";charset=utf8mb4")
         attributes
-        #php {PDO/ATTR_ERRMODE PDO/ERRMODE_EXCEPTION
-              PDO/ATTR_DEFAULT_FETCH_MODE PDO/FETCH_NUM
-              PDO/ATTR_EMULATE_PREPARES false}]
-    (new PDO dsn (get config :user) (get config :password) attributes)))
+        #php {\PDO/ATTR_ERRMODE \PDO/ERRMODE_EXCEPTION
+              \PDO/ATTR_DEFAULT_FETCH_MODE \PDO/FETCH_NUM
+              \PDO/ATTR_EMULATE_PREPARES false}]
+    (new \PDO dsn (get config :user) (get config :password) attributes)))
 
 (defn fetch [pdo sql & [params]]
   (let [statement (.prepare pdo sql)]
-    (.execute statement (to-php-array (or params [])))
-    (mapv vec (.fetchAll statement PDO/FETCH_NUM))))
+    (.execute statement (to-array (or params [])))
+    (mapv vec (.fetchAll statement \PDO/FETCH_NUM))))
 
 (defn fetch-value [pdo sql & [params]]
   (let [statement (.prepare pdo sql)]
-    (.execute statement (to-php-array (or params [])))
+    (.execute statement (to-array (or params [])))
     (let [value (.fetchColumn statement)]
       (if (false? value) nil value))))
 
@@ -191,7 +191,7 @@
 
 (defn- execute-query! [pdo query]
   (let [statement (.prepare pdo (:sql query))]
-    (.execute statement (to-php-array (:params query)))
+    (.execute statement (to-array (:params query)))
     (int (.rowCount statement))))
 
 (defn execute-queries! [pdo queries]
