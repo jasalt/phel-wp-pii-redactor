@@ -25,7 +25,7 @@
         result (transform :users/identity values)
         change (first (:mutations result))
         after  (merge values (:set change))]
-    (is (= (:user_login after) (:user_nicename after)))
+    (is (= "alice-slug" (:user_nicename after)))
     (is (not= "Alice@example.org" (:user_email after)))
     (is (= {:table "custom_table" :pk {:ID 12}} (:locator change)))
     (is (= values (:expected change)))
