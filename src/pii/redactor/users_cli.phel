@@ -29,7 +29,7 @@
     (when-not (and (re-find #"^\d+$" page-size) (<= 1 (int page-size) 10000))
       (throw (new InvalidArgumentException "Invalid page size")))
     {:config (cli/opt ctx "config") :prefix prefix
-     :apply apply? :confirm-db (cli/opt ctx "confirm-db")
+     :apply apply?
      :page-size (int page-size) :json (boolean (cli/opt ctx "json"))
      :keep-users (csv (cli/opt ctx "keep-users"))
      :rules (mapv keyword (csv (cli/opt ctx "rules")))
@@ -54,11 +54,6 @@
       (throw (new RuntimeException "Connected database does not match config")))
     {:pdo pdo :name actual}))
 
-(defn confirm-target! [options target]
-  (when (and (:apply options)
-             (or (s/blank? (:name target)) (not= (:confirm-db options) (:name target))))
-    (throw (new InvalidArgumentException "Apply requires --confirm-db matching the connected database"))))
-
 (defn render-report [report json?]
   (if json?
     (json/encode report)
@@ -70,7 +65,7 @@
                             (:rules report))))))
 
 (def failure-message
-  "Redaction failed. Details suppressed to protect data. Check configuration, schema, selectors, secret and apply confirmation.")
+  "Redaction failed. Details suppressed to protect data. Check configuration, schema, selectors, and secret.")
 
 (defn run-command [ctx]
   ;; Do not allow PDO messages or verbose framework traces to expose field
@@ -81,7 +76,6 @@
       (transforms/hmac-token secret :preflight "preflight" 1)
       (compiler/compile-profile wordpress/user-profile options)
       (let [target (open-target! (:config options))]
-        (confirm-target! options target)
         (cli/writeln ctx (render-report
                           (runner/run! (:pdo target) wordpress/user-profile secret options)
                           (:json options)))
@@ -98,12 +92,11 @@
     :commands
     [{:name "users"
       :doc "Experimental exact-rule users/usermeta redaction for offline clones"
-      :help "Planning is the default. This slice does NOT sanitize a whole database. Set PII_REDACTION_SECRET; apply also requires --confirm-db."
+      :help "Planning is the default. This command does NOT sanitize a whole database. Set PII_REDACTION_SECRET before running it."
       :opts [{:name "config" :mode :required :default "wp-config.php" :doc "Literal WordPress database config"}
              {:name "prefix" :mode :required :doc "Required explicit users/usermeta prefix, e.g. wp_"}
              {:name "apply" :mode :none :doc "Write atomically and verify before commit"}
              {:name "dry-run" :mode :none :doc "Explicit no-write preview"}
-             {:name "confirm-db" :mode :required :doc "Required for apply: exact connected database name"}
              {:name "page-size" :mode :required :default "500" :doc "Rows per page (1..10000)"}
              {:name "json" :mode :none :doc "Safe machine-readable counts, never raw values"}
              {:name "keep-users" :mode :required :doc "Comma-separated logins; preserve users and linked usermeta"}

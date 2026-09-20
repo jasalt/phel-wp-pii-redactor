@@ -1,36 +1,69 @@
-# WordPress PII Redactor (Phel)
+# WordPress PII Redactor
 
-The command-line entry point is `src/users.phel`. Run it through
-[Phel](https://github.com/phel-lang/phel-lang/); no project PHP bootstrap is
-needed. The implementation lives under `src/pii/redactor/`.
+Scrubs personally identifiable information from WordPress database for development purposes.
+
+Requires per project modifications to take into account data stored by plugins, but attempts to provide a simplified (WIP) API for facilitating that.
+
+Written in [Phel](https://github.com/phel-lang/phel-lang/), a Clojure dialect.
+
+## Features
+
+- Safe-by-default preview; writes require `--apply`.
+- Deterministic, idempotent HMAC tokens for identifiers and URLs.
+- Paged reads, primary-key/old-value guarded updates, and transactional apply
+  with post-apply verification.
+- Exact profile rules, table/category/rule selectors, and linked user/usermeta
+  exemptions through `--keep-users`.
+- Count-only text or JSON reports that do not expose source values, tokens,
+  secrets, SQL parameters, or database exception details.
+
+### Information redacted
+
+Rules are currently hard-coded while designed to be customizable.
+
+| Location | Information |
+| --- | --- |
+| `wp_users` | Email, login, and HTTP(S) URL are tokenized; display name becomes `Anonymous`; password hash is replaced and activation/reset key is cleared. |
+| `wp_usermeta` | First name, last name, and nickname become `Anonymous`; biography, description, and messaging identifiers are cleared; profile URL is tokenized. |
+| `wp_usermeta` credentials | Session tokens and application passwords are cleared as whole values, without editing serialized data. |
+
+`user_nicename`, roles, capabilities, user IDs, and metadata not named by an
+exact profile rule are retained. Comments, posts, WooCommerce, plugins, and
+other database tables are not yet redacted.
 
 ## Install and run
+Phel requires PHP 8.5 and Composer. The command-line entry point is `src/main.phel`.
+
+Running in local WordPress dev environment public html root directory:
 
 ```bash
+git clone <repo url>
+cd phel-wp-pii-redactor
 composer install
 
-# Supply a stable secret through the environment, never an argument.
-export PII_REDACTION_SECRET="$(php -r 'echo bin2hex(random_bytes(32));')"
-
 # Planning is the default; this does not write to the database.
-php vendor/bin/phel run src/users.phel \
-  --config /path/to/clone/wp-config.php --prefix wp_ --json
+vendor/bin/phel run src/main.phel --config ../wp-config.php
 
-# Apply only after reviewing a preview. The confirmation must match SELECT DATABASE().
-php vendor/bin/phel run src/users.phel \
-  --config /path/to/clone/wp-config.php --prefix wp_ \
-  --apply --confirm-db wordpress_clone
-
-unset PII_REDACTION_SECRET
+# Apply only after reviewing the plan; preserve the admin account.
+vendor/bin/phel run src/main.phel \
+  --config ../wp-config.php --apply --whitelist-users admin
 ```
 
-If `phel` is on your `PATH`, `phel run src/users.phel ...` is equivalent. Phel
-0.52 requires PHP 8.4; use `php8.4 vendor/bin/phel` when the default `php` is
-older.
+The command does not write unless `--apply` is present. It reports counts rather
+than raw values and suppresses database exception details. Use only an offline
+disposable database clone.
 
-The command does not write unless `--apply` is present. It requires an explicit
-prefix, reports counts rather than raw values, and suppresses database exception
-details. Use only an offline disposable database clone.
+
+## Coverage and limitations
+
+The command uses exact rules for users/usermeta, centralized scope and exemptions,
+keyed transformations, paged reads, guarded updates, and transactional
+verification. **It does not sanitize a whole database.**
+
+See [`PLAN.md`](PLAN.md) for usage, exact coverage, limitations, delivered
+work, and the remaining work; [`ARCHITECTURE.md`](ARCHITECTURE.md)
+contains inline D2 module and execution-flow diagrams. MySQL integration remains
+unverified here; automated database tests use SQLite.
 
 ## Customizing
 
@@ -69,18 +102,8 @@ Matching is case-insensitive. Each matched user and that user's linked
 `usermeta` rows are exempt from all selected rules. An unknown login makes the
 command fail closed. This exemption does not extend to comments or other
 linked/plugin data outside the profile. Add `--keep-users` unchanged to both the
-preview and final `--apply --confirm-db ...` invocation.
+preview and final `--apply` invocation.
 
-## Coverage and limitations
-
-The command uses exact rules for users/usermeta, centralized scope and exemptions,
-keyed transformations, paged reads, guarded updates, and transactional
-verification. **It does not sanitize a whole database.**
-
-See [`PLAN.md`](PLAN.md) for usage, exact coverage, limitations, delivered
-work, and the remaining work; [`ARCHITECTURE.md`](ARCHITECTURE.md)
-contains inline D2 module and execution-flow diagrams. MySQL integration remains
-unverified here; automated database tests use SQLite.
 
 ## Design
 
@@ -88,7 +111,7 @@ The current architecture, delivered work, and remaining work are documented in
 [`PLAN.md`](PLAN.md). [`REPL-GUIDE.md`](REPL-GUIDE.md) contains the validated
 interactive workflow.
 
-Two side-effect-free, REPL-friendly namespaces provide the foundation:
+The implementation lives under `src/pii/redactor/`. Two side-effect-free, REPL-friendly namespaces provide the foundation:
 
 - `transforms.phel` — canonicalization and keyed, idempotent value strategies.
 - `profile.phel` — validation and selection for profiles represented as plain

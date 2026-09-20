@@ -15,7 +15,7 @@ customization work deliberately leaves `user_nicename` out of the
 `users/identity` rule: a field is retained by omitting it from the profile; there
 is no field-level `:keep` selector.
 
-The current tree has 293 passing automated tests under `composer test:all` and
+The current tree has 287 passing automated tests under `composer test:all` and
 clean lint. The latest profile customization retains `user_nicename`; its
 identity and paged-count assertions were updated to cover that behavior. Tests
 use isolated SQLite fixtures. This environment has PDO SQLite but no PDO MySQL
@@ -66,10 +66,8 @@ php vendor/bin/phel run src/users.phel \
   --config /path/to/clone/wp-config.php --prefix wp_ --json
 
 # Apply recomputes a fresh plan inside a transaction.
-# --confirm-db must equal SELECT DATABASE().
 php vendor/bin/phel run src/users.phel \
-  --config /path/to/clone/wp-config.php --prefix wp_ \
-  --apply --confirm-db wordpress_clone
+  --config /path/to/clone/wp-config.php --prefix wp_ --apply
 
 unset PII_REDACTION_SECRET
 ```

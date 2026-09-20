@@ -22,17 +22,9 @@
   (let [result (invoke ["--help"])]
     (is (= 0 (:code result)))
     (is (s/contains? (:text result) "does NOT sanitize a whole database"))
-    (is (s/contains? (:text result) "--confirm-db"))
+    (is (not (s/contains? (:text result) "--confirm-db")))
     (is (s/contains? (:text result) "--exclude-categories"))
     (is (s/contains? (:text result) "PII_REDACTION_SECRET"))))
-
-(deftest confirmation-requires-the-exact-connected-database-name
-  (is (thrown? InvalidArgumentException
-               (users-cli/confirm-target! {:apply true} {:name "clone"})))
-  (is (thrown? InvalidArgumentException
-               (users-cli/confirm-target! {:apply true :confirm-db "other"} {:name "clone"})))
-  (is (nil? (users-cli/confirm-target! {:apply true :confirm-db "clone"} {:name "clone"})))
-  (is (nil? (users-cli/confirm-target! {} {:name "clone"}))))
 
 (deftest cli-preview-apply-and-repeat-run-use-the-real-adapter
   (let [pdo (fixtures/database)
@@ -43,9 +35,7 @@
         (is (= 0 (:code preview)))
         (is (= "plan" (:mode (json/decode (:text preview)))))
         (is (= before (runner-test/snapshot pdo))))
-      (is (= 1 (:code (invoke ["--prefix" "site_" "--apply"]))))
-      (is (= before (runner-test/snapshot pdo)))
-      (let [applied (invoke ["--prefix" "site_" "--apply" "--confirm-db" "fixture-clone"
+      (let [applied (invoke ["--prefix" "site_" "--apply"
                              "--keep-users" "alice" "--json"])
             report (json/decode (:text applied))]
         (is (= 0 (:code applied)))
@@ -62,7 +52,7 @@
         before (runner-test/snapshot pdo)]
     (with-redefs [users-cli/open-target! (fn [_path] {:pdo pdo :name "fixture-clone"})
                   users-cli/secret-from-env (fn [] "fixture-secret")]
-      (let [result (invoke ["--prefix" "site_" "--apply" "--confirm-db" "fixture-clone"
+      (let [result (invoke ["--prefix" "site_" "--apply"
                             "--rules" "users/names,usermeta/names" "--exclude-tables" "usermeta"
                             "--json"])
             report (json/decode (:text result))]

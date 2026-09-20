@@ -93,7 +93,7 @@ pdo: "PDO / clone DB"
 
 preflight: "1. Validate intent before connecting" {
   caller -> cli: "users-entry/run → cli/run → run-command(ctx)"
-  cli -> cli: "options-from(ctx) → {:prefix \"site_\" :apply true :confirm-db \"wordpress_clone\"\n:rules [:users/names] :keep-users [\"local-admin\"] :page-size 250 ...}"
+  cli -> cli: "options-from(ctx) → {:prefix \"site_\" :apply true\n:rules [:users/names] :keep-users [\"local-admin\"] :page-size 250 ...}"
   cli -> cli: "secret-from-env() → secret"
   cli -> values: "hmac-token(secret, :preflight, \"preflight\", 1)"
   values -> cli: "Non-empty secret validated; discard token"
@@ -115,7 +115,6 @@ connection: "2. Open and confirm the actual target" {
   store -> pdo: "prepare / execute / fetchAll"
   pdo -> store: "[[\"wordpress_clone\"]]"
   store -> cli: "Actual DB name; open-target! requires config name to match"
-  cli -> cli: "confirm-target!(options, {:pdo pdo :name \"wordpress_clone\"})\nApply requires exact --confirm-db match"
 }
 
 prepare: "3. Runner independently validates and resolves schema" {
