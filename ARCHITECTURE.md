@@ -18,8 +18,6 @@ Pure modules accept and return ordinary Phel data; they do not connect to a
  database, print reports, or keep mutable replacement registries.
 
 ```d2
-direction: right
-
 entry: "src/users.phel\nEntry point: argv → phel.cli → exit code"
 cli: "users_cli.phel\nIntent, secret, preflight, DB confirmation\nSafe text/JSON output; suppress error details"
 config: "db.phel (shared with legacy)\nParse literal wp-config; open PDO connection"
